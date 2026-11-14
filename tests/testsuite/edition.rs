@@ -1,7 +1,8 @@
 //! Tests for edition setting.
 
-use cargo::core::Edition;
-use cargo_test_support::{basic_lib_manifest, is_nightly, project};
+use crate::prelude::*;
+use cargo::workspace::Edition;
+use cargo_test_support::{basic_lib_manifest, project, str};
 
 #[cargo_test]
 fn edition_works_for_build_script() {
@@ -31,7 +32,7 @@ fn edition_works_for_build_script() {
         .file("a/src/lib.rs", "pub fn foo() {}")
         .build();
 
-    p.cargo("build -v").run();
+    p.cargo("check -v").run();
 }
 
 #[cargo_test]
@@ -64,33 +65,25 @@ fn edition_unstable_gated() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr(&format!(
+        .with_stderr_data(format!(
             "\
-[ERROR] failed to parse manifest at `[..]/foo/Cargo.toml`
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `edition{next}` is required
 
-  The package requires the Cargo feature called `edition{next}`, \
-  but that feature is not stabilized in this version of Cargo (1.[..]).
+  The package requires the Cargo feature called `edition{next}`, but that feature is not stabilized in this version of Cargo (1.[..]).
   Consider trying a newer version of Cargo (this may require the nightly release).
-  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#edition-{next} \
-  for more information about the status of this feature.
-",
-            next = next
-        ))
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#edition-{next} for more information about the status of this feature.
+"))
         .run();
 }
 
-#[cargo_test]
+#[cargo_test(nightly, reason = "fundamentally always nightly")]
 fn edition_unstable() {
     // During the period where a new edition is coming up, but not yet stable,
     // this test will verify that it can be used with `cargo-features`. If
     // there is no next edition, it does nothing.
-    if !is_nightly() {
-        // This test is fundamentally always nightly.
-        return;
-    }
     let next = match Edition::LATEST_UNSTABLE {
         Some(next) => next,
         None => {
@@ -117,12 +110,199 @@ fn edition_unstable() {
         .build();
 
     p.cargo("check")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[CHECKING] foo [..]
-[FINISHED] [..]
-",
+        .masquerade_as_nightly_cargo(&["always_nightly"])
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn unset_edition_with_unset_rust_version() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = 'foo'
+                version = '0.1.0'
+            "#,
         )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check -v")
+        .with_stderr_data(str![[r#"
+[WARNING] Cargo.toml: `package.edition` is unspecified, defaulting to `2015` while the latest is `2024`
+[WARNING] `foo` (manifest) generated 1 warning
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc [..] --edition=2015 [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn unset_edition_works_with_no_newer_compatible_edition() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = 'foo'
+                version = '0.1.0'
+                rust-version = "1.0"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check -v")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc [..] --edition=2015 [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn unset_edition_works_on_old_msrv() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = 'foo'
+                version = '0.1.0'
+                rust-version = "1.50"  # contains 2018 edition
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check -v")
+        .with_stderr_data(str![[r#"
+[WARNING] Cargo.toml: `package.edition` is unspecified, defaulting to `2015` while 2018 is compatible with `rust-version`
+[WARNING] `foo` (manifest) generated 1 warning
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc [..] --edition=2015 [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn future_edition_is_gated() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                edition = "future"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `unstable-editions` is required
+
+  The package requires the Cargo feature called `unstable-editions`, but that feature is not stabilized in this version of Cargo ([..]).
+  Consider trying a newer version of Cargo (this may require the nightly release).
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#unstable-editions for more information about the status of this feature.
+
+"#]])
+        .run();
+
+    // Repeat on nightly.
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["unstable-editions"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `unstable-editions` is required
+
+  The package requires the Cargo feature called `unstable-editions`, but that feature is not stabilized in this version of Cargo ([..]).
+  Consider adding `cargo-features = ["unstable-editions"]` to the top of Cargo.toml (above the [package] table) to tell Cargo you are opting in to use this unstable feature.
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#unstable-editions for more information about the status of this feature.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn future_edition_with_rust_version_hint() {
+    // When an unstable edition is used and the package has `rust-version` set,
+    // the error message should include a `help:` line pointing the user at the
+    // required Rust toolchain version, matching the format used elsewhere in
+    // Cargo (e.g. `{name}@{version} requires rust {msrv}`).
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "future"
+                rust-version = "1.90"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `unstable-editions` is required
+
+  The package requires the Cargo feature called `unstable-editions`, but that feature is not stabilized in this version of Cargo ([..]).
+  Consider trying a newer version of Cargo (this may require the nightly release).
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#unstable-editions for more information about the status of this feature.
+  [HELP] foo@0.1.0 requires rust 1.90
+
+"#]])
+        .run();
+}
+
+#[cargo_test(nightly, reason = "future edition is always unstable")]
+fn future_edition_works() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                cargo-features = ["unstable-editions"]
+
+                [package]
+                name = "foo"
+                edition = "future"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["unstable-editions"])
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }

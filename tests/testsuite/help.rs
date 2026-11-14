@@ -1,10 +1,14 @@
 //! Tests for cargo's help output.
 
-use cargo_test_support::registry::Package;
-use cargo_test_support::{basic_manifest, cargo_exe, cargo_process, paths, process, project};
 use std::fs;
 use std::path::Path;
 use std::str::from_utf8;
+
+use crate::prelude::*;
+use crate::utils::cargo_process;
+use cargo_test_support::registry::Package;
+use cargo_test_support::str;
+use cargo_test_support::{basic_manifest, paths, project};
 
 #[cargo_test]
 fn help() {
@@ -14,11 +18,6 @@ fn help() {
     cargo_process("help build").run();
     cargo_process("build -h").run();
     cargo_process("help help").run();
-    // Ensure that help output goes to stdout, not stderr.
-    cargo_process("search --help").with_stderr("").run();
-    cargo_process("search --help")
-        .with_stdout_contains("[..] --frozen [..]")
-        .run();
 }
 
 #[cargo_test]
@@ -39,18 +38,10 @@ fn help_external_subcommand() {
         .publish();
     cargo_process("install cargo-fake-help").run();
     cargo_process("help fake-help")
-        .with_stdout("fancy help output\n")
-        .run();
-}
+        .with_stdout_data(str![[r#"
+fancy help output
 
-#[cargo_test]
-fn z_flags_help() {
-    // Test that the output of `cargo -Z help` shows a different help screen with
-    // all the `-Z` flags.
-    cargo_process("-Z help")
-        .with_stdout_contains(
-            "    -Z allow-features[..]-- Allow *only* the listed unstable features",
-        )
+"#]])
         .run();
 }
 
@@ -84,22 +75,18 @@ fn help_with_man_and_path(
     path: &Path,
 ) {
     let contents = if display_command == "man" {
-        fs::read_to_string(format!("src/etc/man/cargo-{}.1", actual_subcommand)).unwrap()
+        fs::read_to_string(format!("etc/man/cargo-{}.1", actual_subcommand)).unwrap()
     } else {
         fs::read_to_string(format!(
-            "src/doc/man/generated_txt/cargo-{}.txt",
+            "doc/man/generated_txt/cargo-{}.txt",
             actual_subcommand
         ))
         .unwrap()
     };
 
-    let output = process(&cargo_exe())
-        .arg("help")
-        .arg(subcommand)
+    let output = cargo_process(&format!("help {subcommand}"))
         .env("PATH", path)
-        .exec_with_output()
-        .unwrap();
-    assert!(output.status.success());
+        .run();
     let stderr = from_utf8(&output.stderr).unwrap();
     if display_command.is_empty() {
         assert_eq!(stderr, "");
@@ -108,6 +95,16 @@ fn help_with_man_and_path(
     }
     let stdout = from_utf8(&output.stdout).unwrap();
     assert_eq!(stdout, contents);
+}
+
+fn help_with_stdout_and_path(subcommand: &str, path: &Path) -> String {
+    let output = cargo_process(&format!("help {subcommand}"))
+        .env("PATH", path)
+        .run();
+    let stderr = from_utf8(&output.stderr).unwrap();
+    assert_eq!(stderr, "");
+    let stdout = from_utf8(&output.stdout).unwrap();
+    stdout.to_string()
 }
 
 #[cargo_test]
@@ -122,19 +119,72 @@ fn help_man() {
 }
 
 #[cargo_test]
+fn help_man_temp_file_extension() {
+    let p = project()
+        .at("man")
+        .file("Cargo.toml", &basic_manifest("man", "1.0.0"))
+        .file(
+            "src/main.rs",
+            r#"
+                fn main() {
+                    let path = std::env::args().nth(1).unwrap();
+                    if path.ends_with(".1") {
+                        println!("has .1 extension");
+                    } else {
+                        println!("no .1 extension");
+                    }
+                }
+            "#,
+        )
+        .build();
+    p.cargo("build").run();
+
+    cargo_process("help build")
+        .env("PATH", &p.target_debug_dir())
+        .with_stdout_data(str![[r#"
+has .1 extension
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn help_alias() {
     // Check that `help some_alias` will resolve.
     help_with_man_and_path("", "b", "build", Path::new(""));
 
-    let config = paths::root().join(".cargo/config");
+    let config = paths::root().join(".cargo/config.toml");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(
         config,
         r#"
             [alias]
-            my-alias = ["build", "--release"]
+            empty-alias   = ""
+            simple-alias  = "build"
+            complex-alias = ["build", "--release"]
         "#,
     )
     .unwrap();
-    help_with_man_and_path("", "my-alias", "build", Path::new(""));
+
+    // The `empty-alias` returns an error.
+    cargo_process("help empty-alias")
+        .env("PATH", Path::new(""))
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no such command: `empty-alias`
+
+[HELP] a command with a similar name exists: `empty-alias`
+
+[HELP] view all installed commands with `cargo --list`
+[HELP] find a package to install `empty-alias` with `cargo search cargo-empty-alias`
+
+"#]])
+        .run();
+
+    // Because `simple-alias` aliases a subcommand with no arguments, help shows the manpage.
+    help_with_man_and_path("", "simple-alias", "build", Path::new(""));
+
+    // Help for `complex-alias` displays the full alias command.
+    let out = help_with_stdout_and_path("complex-alias", Path::new(""));
+    assert_eq!(out, "`complex-alias` is aliased to `build --release`\n");
 }

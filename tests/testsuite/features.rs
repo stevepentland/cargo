@@ -1,18 +1,23 @@
 //! Tests for `[features]` table.
 
-use cargo_test_support::paths::CargoPathExt;
+use std::fs::File;
+
+use crate::prelude::*;
+use cargo_test_support::publish::validate_crate_contents;
 use cargo_test_support::registry::{Dependency, Package};
 use cargo_test_support::{basic_manifest, project};
+use cargo_test_support::{rustc_host, str};
 
 #[cargo_test]
-fn invalid1() {
+fn feature_activates_missing_feature() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -22,28 +27,97 @@ fn invalid1() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `bar` includes `baz` which is neither a dependency nor another feature
-",
-        )
+
+  [HELP] a feature with a similar name exists: `bar`
+
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn invalid2() {
+fn feature_activates_typoed_feature() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [features]
+                bar = ["baz"]
+                jaz = []
+            "#,
+        )
+        .file("src/main.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `bar` includes `baz` which is neither a dependency nor another feature
+
+  [HELP] a feature with a similar name exists: `bar`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn empty_feature_name() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [features]
+                "" = []
+            "#,
+        )
+        .file("src/main.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] feature name cannot be empty
+ --> Cargo.toml:9:17
+  |
+9 |                 "" = []
+  |                 ^^
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn same_name() {
+    // Feature with the same name as a dependency.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -59,28 +133,40 @@ fn invalid2() {
         .file("bar/src/lib.rs", "")
         .build();
 
-    p.cargo("build")
-        .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+    p.cargo("tree -f")
+        .arg("{p} [{f}]")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
 
-Caused by:
-  features and dependencies cannot have the same name: `bar`
-",
-        )
+"#]])
+        .with_stdout_data(str![[r#"
+foo v0.0.1 ([ROOT]/foo) []
+└── bar v1.0.0 ([ROOT]/foo/bar) []
+
+"#]])
+        .run();
+
+    p.cargo("tree --features bar -f")
+        .arg("{p} [{f}]")
+        .with_stderr_data("")
+        .with_stdout_data(str![[r#"
+foo v0.0.1 ([ROOT]/foo) [bar,baz]
+└── bar v1.0.0 ([ROOT]/foo/bar) []
+
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn invalid3() {
+fn feature_activates_required_dependency() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -93,29 +179,29 @@ fn invalid3() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `bar` includes `baz`, but `baz` is not an optional dependency
   A non-optional dependency of the same name is defined; consider adding `optional = true` to its definition.
-",
-        )
+
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn invalid4() {
+fn dependency_activates_missing_feature() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -128,38 +214,144 @@ fn invalid4() {
         .file("bar/src/lib.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to select a version for `bar`.
-    ... required by package `foo v0.0.1 ([..])`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to select a version for `bar`.
+    ... required by package `foo v0.0.1 ([ROOT]/foo)`
 versions that meet the requirements `*` are: 0.0.1
 
-the package `foo` depends on `bar`, with features: `bar` but `bar` does not have these features.
+package `foo` depends on `bar` with feature `bar` but `bar` does not have that feature.
 
 
-failed to select a version for `bar` which could resolve this conflict",
-        )
+failed to select a version for `bar` which could resolve this conflict
+
+"#]])
         .run();
 
     p.change_file("Cargo.toml", &basic_manifest("foo", "0.0.1"));
 
-    p.cargo("build --features test")
+    p.cargo("check --features test")
         .with_status(101)
-        .with_stderr("error: Package `foo v0.0.1 ([..])` does not have the feature `test`")
+        .with_stderr_data(str![[r#"
+[ERROR] package `foo v0.0.1 ([ROOT]/foo)` does not have the feature `test`
+
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn invalid5() {
+fn dependency_activates_typoed_feature() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [dependencies.bar]
+                path = "bar"
+                features = ["bar"]
+            "#,
+        )
+        .file("src/main.rs", "")
+        .file(
+            "bar/Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [features]
+                baz = []
+"#,
+        )
+        .file("bar/src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to select a version for `bar`.
+    ... required by package `foo v0.0.1 ([ROOT]/foo)`
+versions that meet the requirements `*` are: 0.0.1
+
+package `foo` depends on `bar` with feature `bar` but `bar` does not have that feature.
+[HELP] there is a feature `baz` with a similar name
+
+
+failed to select a version for `bar` which could resolve this conflict
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn dependency_activates_feature_with_no_close_match() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+
+                [dependencies.bar]
+                path = "bar"
+                features = ["serde"]
+            "#,
+        )
+        .file("src/main.rs", "")
+        .file(
+            "bar/Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                version = "0.0.1"
+                edition = "2015"
+
+                [features]
+                json = []
+                tls = []
+                cookies = []
+"#,
+        )
+        .file("bar/src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to select a version for `bar`.
+    ... required by package `foo v0.0.1 ([ROOT]/foo)`
+versions that meet the requirements `*` are: 0.0.1
+
+package `foo` depends on `bar` with feature `serde` but `bar` does not have that feature.
+[HELP] available features: cookies, json, tls
+
+
+failed to select a version for `bar` which could resolve this conflict
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn optional_dev_dependency() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dev-dependencies.bar]
@@ -170,28 +362,28 @@ fn invalid5() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   dev-dependencies are not allowed to be optional: `bar`
-",
-        )
+
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn invalid6() {
+fn feature_activates_missing_dep_feature() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -201,28 +393,30 @@ fn invalid6() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build --features foo")
+    p.cargo("check --features foo")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] feature `foo` includes `bar/baz`, but `bar` is not a dependency
+ --> Cargo.toml:9:23
+  |
+9 |                 foo = ["bar/baz"]
+  |                       ^^^^^^^^^^^
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
-Caused by:
-  feature `foo` includes `bar/baz`, but `bar` is not a dependency
-",
-        )
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn invalid7() {
+fn feature_activates_feature_inside_feature() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -233,28 +427,30 @@ fn invalid7() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build --features foo")
+    p.cargo("check --features foo")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] feature `foo` includes `bar/baz`, but `bar` is not a dependency
+ --> Cargo.toml:9:23
+  |
+9 |                 foo = ["bar/baz"]
+  |                       ^^^^^^^^^^^
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
-Caused by:
-  feature `foo` includes `bar/baz`, but `bar` is not a dependency
-",
-        )
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn invalid8() {
+fn dependency_activates_dep_feature() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -267,29 +463,29 @@ fn invalid8() {
         .file("bar/src/lib.rs", "")
         .build();
 
-    p.cargo("build --features foo")
+    p.cargo("check --features foo")
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[CWD]/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `foo/bar` in dependency `bar` is not allowed to contain slashes
   If you want to enable features [..]
-",
-        )
+
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn invalid9() {
+fn cli_activates_required_dependency() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -301,23 +497,28 @@ fn invalid9() {
         .file("bar/src/lib.rs", "")
         .build();
 
-    p.cargo("build --features bar")
-        .with_stderr(
-            "\
-error: Package `foo v0.0.1 ([..])` does not have feature `bar`. It has a required dependency with that name, but only optional dependencies can be used as features.
-",
-        ).with_status(101).run();
+    p.cargo("check --features bar")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[ERROR] package `foo v0.0.1 ([ROOT]/foo)` does not have feature `bar`
+
+[HELP] a dependency with that name exists but it is required dependency and only optional dependencies can be used as features.
+
+"#]])
+        .with_status(101)
+        .run();
 }
 
 #[cargo_test]
-fn invalid10() {
+fn dependency_activates_required_dependency() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -332,6 +533,7 @@ fn invalid10() {
                 [package]
                 name = "bar"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.baz]
@@ -343,17 +545,20 @@ fn invalid10() {
         .file("bar/baz/src/lib.rs", "")
         .build();
 
-    p.cargo("build").with_stderr("\
-error: failed to select a version for `bar`.
-    ... required by package `foo v0.0.1 ([..])`
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[ERROR] failed to select a version for `bar`.
+    ... required by package `foo v0.0.1 ([ROOT]/foo)`
 versions that meet the requirements `*` are: 0.0.1
 
-the package `foo` depends on `bar`, with features: `baz` but `bar` does not have these features.
- It has a required dependency with that name, but only optional dependencies can be used as features.
+package `foo` depends on `bar` with feature `baz` but `bar` does not have that feature.
+[NOTE] a required dependency with that name exists, but only optional dependencies can be used as features.
 
 
 failed to select a version for `bar` which could resolve this conflict
-").with_status(101)
+
+"#]])
+        .with_status(101)
         .run();
 }
 
@@ -363,9 +568,10 @@ fn no_transitive_dep_feature_requirement() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.derived]
@@ -388,6 +594,7 @@ fn no_transitive_dep_feature_requirement() {
                 [package]
                 name = "derived"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -401,6 +608,7 @@ fn no_transitive_dep_feature_requirement() {
                 [package]
                 name = "bar"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -415,16 +623,15 @@ fn no_transitive_dep_feature_requirement() {
             "#,
         )
         .build();
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[CWD]/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   multiple slashes in feature `derived/bar/qux` (included by feature `default`) are not allowed
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -434,9 +641,10 @@ fn no_feature_doesnt_build() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -460,25 +668,31 @@ fn no_feature_doesnt_build() {
         .build();
 
     p.cargo("build")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
-        .run();
-    p.process(&p.bin("foo")).with_stdout("").run();
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-    p.cargo("build --features bar")
-        .with_stderr(
-            "\
-[COMPILING] bar v0.0.1 ([CWD]/bar)
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+"#]])
         .run();
-    p.process(&p.bin("foo")).with_stdout("bar\n").run();
+    p.process(&p.bin("foo")).with_stdout_data("").run();
+
+    p.cargo("build --features bar -v")
+        .with_stderr_data(str![[r#"
+[COMPILING] bar v0.0.1 ([ROOT]/foo/bar)
+[RUNNING] `rustc --crate-name bar [..]`
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.process(&p.bin("foo"))
+        .with_stdout_data(str![[r#"
+bar
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -487,9 +701,10 @@ fn default_feature_pulled_in() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -516,25 +731,30 @@ fn default_feature_pulled_in() {
         .build();
 
     p.cargo("build")
-        .with_stderr(
-            "\
-[COMPILING] bar v0.0.1 ([CWD]/bar)
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
-        .run();
-    p.process(&p.bin("foo")).with_stdout("bar\n").run();
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[COMPILING] bar v0.0.1 ([ROOT]/foo/bar)
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 
-    p.cargo("build --no-default-features")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+"#]])
         .run();
-    p.process(&p.bin("foo")).with_stdout("").run();
+    p.process(&p.bin("foo"))
+        .with_stdout_data(str![[r#"
+bar
+
+"#]])
+        .run();
+
+    p.cargo("build --no-default-features -v")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.process(&p.bin("foo")).with_stdout_data("").run();
 }
 
 #[cargo_test]
@@ -543,9 +763,10 @@ fn cyclic_feature() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -555,9 +776,12 @@ fn cyclic_feature() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr("[ERROR] cyclic feature dependency: feature `default` depends on itself")
+        .with_stderr_data(str![[r#"
+[ERROR] cyclic feature dependency: feature `default` depends on itself
+
+"#]])
         .run();
 }
 
@@ -567,9 +791,10 @@ fn cyclic_feature2() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -580,7 +805,13 @@ fn cyclic_feature2() {
         .file("src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("build").with_stdout("").run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -589,9 +820,10 @@ fn groups_on_groups_on_groups() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -629,14 +861,17 @@ fn groups_on_groups_on_groups() {
         .file("baz/src/lib.rs", "pub fn baz() {}")
         .build();
 
-    p.cargo("build")
-        .with_stderr(
-            "\
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
+    p.cargo("check")
+        .with_stderr_data(
+            str![[r#"
+[LOCKING] 2 packages to highest compatible versions
+[CHECKING] bar v0.0.1 ([ROOT]/foo/bar)
+[CHECKING] baz v0.0.1 ([ROOT]/foo/baz)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -647,9 +882,10 @@ fn many_cli_features() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -677,15 +913,18 @@ fn many_cli_features() {
         .file("baz/src/lib.rs", "pub fn baz() {}")
         .build();
 
-    p.cargo("build --features")
+    p.cargo("check --features")
         .arg("bar baz")
-        .with_stderr(
-            "\
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
+        .with_stderr_data(
+            str![[r#"
+[LOCKING] 2 packages to highest compatible versions
+[CHECKING] bar v0.0.1 ([ROOT]/foo/bar)
+[CHECKING] baz v0.0.1 ([ROOT]/foo/baz)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -696,9 +935,10 @@ fn union_features() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.d1]
@@ -727,6 +967,7 @@ fn union_features() {
                 [package]
                 name = "d1"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -745,6 +986,7 @@ fn union_features() {
                 [package]
                 name = "d2"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -761,15 +1003,15 @@ fn union_features() {
         )
         .build();
 
-    p.cargo("build")
-        .with_stderr(
-            "\
-[COMPILING] d2 v0.0.1 ([CWD]/d2)
-[COMPILING] d1 v0.0.1 ([CWD]/d1)
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[LOCKING] 2 packages to highest compatible versions
+[CHECKING] d2 v0.0.1 ([ROOT]/foo/d2)
+[CHECKING] d1 v0.0.1 ([ROOT]/foo/d1)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -782,11 +1024,15 @@ fn many_features_no_rebuilds() {
                 [package]
                 name    = "b"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies.a]
                 path = "a"
                 features = ["fall"]
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/main.rs", "fn main() {}")
@@ -796,36 +1042,39 @@ fn many_features_no_rebuilds() {
                 [package]
                 name    = "a"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [features]
                 ftest  = []
                 ftest2 = []
                 fall   = ["ftest", "ftest2"]
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a/src/lib.rs", "")
         .build();
 
-    p.cargo("build")
-        .with_stderr(
-            "\
-[COMPILING] a v0.1.0 ([CWD]/a)
-[COMPILING] b v0.1.0 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[CHECKING] a v0.1.0 ([ROOT]/foo/a)
+[CHECKING] b v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     p.root().move_into_the_past();
 
-    p.cargo("build -v")
-        .with_stderr(
-            "\
-[FRESH] a v0.1.0 ([..]/a)
-[FRESH] b v0.1.0 ([..])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+    p.cargo("check -v")
+        .with_stderr_data(str![[r#"
+[FRESH] a v0.1.0 ([ROOT]/foo/a)
+[FRESH] b v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -834,7 +1083,7 @@ fn many_features_no_rebuilds() {
 fn empty_features() {
     let p = project().file("src/main.rs", "fn main() {}").build();
 
-    p.cargo("build --features").arg("").run();
+    p.cargo("check --features").arg("").run();
 }
 
 // Tests that all cmd lines work with `--features ""`
@@ -844,9 +1093,10 @@ fn transitive_features() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -863,6 +1113,7 @@ fn transitive_features() {
                 [package]
                 name = "bar"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -875,7 +1126,7 @@ fn transitive_features() {
         )
         .build();
 
-    p.cargo("build --features foo").run();
+    p.cargo("check --features foo").run();
 }
 
 #[cargo_test]
@@ -884,9 +1135,10 @@ fn everything_in_the_lockfile() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -910,6 +1162,7 @@ fn everything_in_the_lockfile() {
                 [package]
                 name = "d1"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -925,6 +1178,7 @@ fn everything_in_the_lockfile() {
                 [package]
                 name = "d3"
                 version = "0.0.3"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -962,11 +1216,15 @@ fn no_rebuild_when_frobbing_default_feature() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 a = { path = "a" }
                 b = { path = "b" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -976,10 +1234,14 @@ fn no_rebuild_when_frobbing_default_feature() {
                 [package]
                 name = "b"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 a = { path = "../a", features = ["f1"], default-features = false }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("b/src/lib.rs", "")
@@ -989,19 +1251,33 @@ fn no_rebuild_when_frobbing_default_feature() {
                 [package]
                 name = "a"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [features]
                 default = ["f1"]
                 f1 = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a/src/lib.rs", "")
         .build();
 
-    p.cargo("build").run();
-    p.cargo("build").with_stdout("").run();
-    p.cargo("build").with_stdout("").run();
+    p.cargo("check").run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -1013,11 +1289,15 @@ fn unions_work_with_no_default_features() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 a = { path = "a" }
                 b = { path = "b" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "extern crate a; pub fn foo() { a::a(); }")
@@ -1027,10 +1307,14 @@ fn unions_work_with_no_default_features() {
                 [package]
                 name = "b"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 a = { path = "../a", features = [], default-features = false }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("b/src/lib.rs", "")
@@ -1040,19 +1324,33 @@ fn unions_work_with_no_default_features() {
                 [package]
                 name = "a"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [features]
                 default = ["f1"]
                 f1 = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a/src/lib.rs", r#"#[cfg(feature = "f1")] pub fn a() {}"#)
         .build();
 
-    p.cargo("build").run();
-    p.cargo("build").with_stdout("").run();
-    p.cargo("build").with_stdout("").run();
+    p.cargo("check").run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -1064,6 +1362,7 @@ fn optional_and_dev_dep() {
                 [package]
                 name    = "test"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -1077,13 +1376,13 @@ fn optional_and_dev_dep() {
         .file("foo/src/lib.rs", "")
         .build();
 
-    p.cargo("build")
-        .with_stderr(
-            "\
-[COMPILING] test v0.1.0 ([..])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[CHECKING] test v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -1096,6 +1395,7 @@ fn activating_feature_activates_dep() {
                 [package]
                 name    = "test"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -1115,6 +1415,7 @@ fn activating_feature_activates_dep() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1124,7 +1425,62 @@ fn activating_feature_activates_dep() {
         .file("foo/src/lib.rs", r#"#[cfg(feature = "a")] pub fn bar() {}"#)
         .build();
 
-    p.cargo("build --features a -v").run();
+    p.cargo("check --features a -v").run();
+}
+
+#[cargo_test]
+fn activating_feature_does_not_activate_transitive_dev_dependency() {
+    let p = project()
+        .no_manifest()
+        .file(
+            "a/Cargo.toml",
+            r#"
+                [package]
+                name = "a"
+                version = "0.0.0"
+                edition = "2021"
+
+                [features]
+                f = ["b/f"]
+
+                [dependencies]
+                b = { path = "../b" }
+            "#,
+        )
+        .file(
+            "b/Cargo.toml",
+            r#"
+                [package]
+                name = "b"
+                version = "0.0.0"
+                edition = "2021"
+
+                [features]
+                f = ["c/f"]
+
+                [dev-dependencies]
+                c = { path = "../c" }
+            "#,
+        )
+        .file(
+            "c/Cargo.toml",
+            r#"
+                [package]
+                name = "c"
+                version = "0.0.0"
+                edition = "2021"
+
+                [features]
+                f = []
+            "#,
+        )
+        .file("a/src/lib.rs", "")
+        .file("b/src/lib.rs", "")
+        .file("c/src/lib.rs", "compile_error!")
+        .build();
+
+    p.cargo("check --manifest-path a/Cargo.toml --features f")
+        .run();
 }
 
 #[cargo_test]
@@ -1133,9 +1489,10 @@ fn dep_feature_in_cmd_line() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.derived]
@@ -1155,6 +1512,7 @@ fn dep_feature_in_cmd_line() {
                 [package]
                 name = "derived"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -1172,6 +1530,7 @@ fn dep_feature_in_cmd_line() {
                 [package]
                 name = "bar"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1189,25 +1548,35 @@ fn dep_feature_in_cmd_line() {
 
     // The foo project requires that feature "some-feat" in "bar" is enabled.
     // Building without any features enabled should fail:
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr_contains("[..]unresolved import `bar::test`")
+        .with_stderr_data(str![[r#"
+...
+error[E0432]: unresolved import `bar::test`
+...
+"#]])
         .run();
 
     // We should be able to enable the feature "derived-feat", which enables "some-feat",
     // on the command line. The feature is enabled, thus building should be successful:
-    p.cargo("build --features derived/derived-feat").run();
+    p.cargo("check --features derived/derived-feat").run();
 
     // Trying to enable features of transitive dependencies is an error
-    p.cargo("build --features bar/some-feat")
+    p.cargo("check --features bar/some-feat")
         .with_status(101)
-        .with_stderr("error: package `foo v0.0.1 ([..])` does not have a dependency named `bar`")
+        .with_stderr_data(str![[r#"
+[ERROR] package `foo v0.0.1 ([ROOT]/foo)` does not have a dependency named `bar`
+
+"#]])
         .run();
 
     // Hierarchical feature specification should still be disallowed
-    p.cargo("build --features derived/bar/some-feat")
+    p.cargo("check --features derived/bar/some-feat")
         .with_status(101)
-        .with_stderr("[ERROR] multiple slashes in feature `derived/bar/some-feat` is not allowed")
+        .with_stderr_data(str![[r#"
+[ERROR] multiple slashes in feature `derived/bar/some-feat` is not allowed
+
+"#]])
         .run();
 }
 
@@ -1217,9 +1586,10 @@ fn all_features_flag_enables_all_features() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1253,7 +1623,7 @@ fn all_features_flag_enables_all_features() {
         .file("baz/src/lib.rs", "pub fn baz() {}")
         .build();
 
-    p.cargo("build --all-features").run();
+    p.cargo("check --all-features").run();
 }
 
 #[cargo_test]
@@ -1262,9 +1632,10 @@ fn many_cli_features_comma_delimited() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -1292,14 +1663,17 @@ fn many_cli_features_comma_delimited() {
         .file("baz/src/lib.rs", "pub fn baz() {}")
         .build();
 
-    p.cargo("build --features bar,baz")
-        .with_stderr(
-            "\
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
+    p.cargo("check --features bar,baz")
+        .with_stderr_data(
+            str![[r#"
+[LOCKING] 2 packages to highest compatible versions
+[CHECKING] bar v0.0.1 ([ROOT]/foo/bar)
+[CHECKING] baz v0.0.1 ([ROOT]/foo/baz)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -1310,9 +1684,10 @@ fn many_cli_features_comma_and_space_delimited() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -1356,17 +1731,20 @@ fn many_cli_features_comma_and_space_delimited() {
         .file("bap/src/lib.rs", "pub fn bap() {}")
         .build();
 
-    p.cargo("build --features")
+    p.cargo("check --features")
         .arg("bar,baz bam bap")
-        .with_stderr(
-            "\
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] ba[..] v0.0.1 ([CWD]/ba[..])
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
+        .with_stderr_data(
+            str![[r#"
+[LOCKING] 4 packages to highest compatible versions
+[CHECKING] bam v0.0.1 ([ROOT]/foo/bam)
+[CHECKING] bap v0.0.1 ([ROOT]/foo/bap)
+[CHECKING] bar v0.0.1 ([ROOT]/foo/bar)
+[CHECKING] baz v0.0.1 ([ROOT]/foo/baz)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -1379,9 +1757,10 @@ fn only_dep_is_optional() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1397,7 +1776,7 @@ fn only_dep_is_optional() {
         .file("src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("build").run();
+    p.cargo("check").run();
 }
 
 #[cargo_test]
@@ -1408,9 +1787,10 @@ fn all_features_all_crates() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [workspace]
@@ -1421,9 +1801,10 @@ fn all_features_all_crates() {
         .file(
             "bar/Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "bar"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1433,7 +1814,7 @@ fn all_features_all_crates() {
         .file("bar/src/main.rs", "#[cfg(feature = \"foo\")] fn main() {}")
         .build();
 
-    p.cargo("build --all-features --workspace").run();
+    p.cargo("check --all-features --workspace").run();
 }
 
 #[cargo_test]
@@ -1448,6 +1829,7 @@ fn feature_off_dylib() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [lib]
                 crate-type = ["dylib"]
@@ -1474,6 +1856,7 @@ fn feature_off_dylib() {
                 [package]
                 name = "bar"
                 version = "0.0.1"
+                edition = "2015"
 
                 [dependencies]
                 foo = { path = ".." }
@@ -1492,7 +1875,7 @@ fn feature_off_dylib() {
         .build();
 
     // Build the dylib with `f1` feature.
-    p.cargo("build --features f1").run();
+    p.cargo("check --features f1").run();
     // Check that building without `f1` uses a dylib without `f1`.
     p.cargo("run -p bar").run();
 }
@@ -1503,9 +1886,10 @@ fn warn_if_default_features() {
         .file(
             "Cargo.toml",
             r#"
-               [project]
+               [package]
                name = "foo"
                version = "0.0.1"
+               edition = "2015"
                authors = []
 
                [dependencies.bar]
@@ -1521,14 +1905,17 @@ fn warn_if_default_features() {
         .file("bar/src/lib.rs", "pub fn bar() {}")
         .build();
 
-    p.cargo("build")
-        .with_stderr(
-            r#"
-[WARNING] `default-features = [".."]` was found in [features]. Did you mean to use `default = [".."]`?
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-            "#.trim(),
-        ).run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[WARNING] Cargo.toml: `[features]` defines a feature named `default-features`
+[NOTE] only a feature named `default` will be enabled by default
+[WARNING] `foo` (manifest) generated 1 warning
+[LOCKING] 1 package to highest compatible version
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -1537,9 +1924,10 @@ fn no_feature_for_non_optional_dep() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -1557,9 +1945,10 @@ fn no_feature_for_non_optional_dep() {
         .file(
             "bar/Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "bar"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1569,7 +1958,7 @@ fn no_feature_for_non_optional_dep() {
         .file("bar/src/lib.rs", "pub fn bar() {}")
         .build();
 
-    p.cargo("build --features bar/a").run();
+    p.cargo("check --features bar/a").run();
 }
 
 #[cargo_test]
@@ -1578,9 +1967,10 @@ fn features_option_given_twice() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1597,7 +1987,7 @@ fn features_option_given_twice() {
         )
         .build();
 
-    p.cargo("build --features a --features b").run();
+    p.cargo("check --features a --features b").run();
 }
 
 #[cargo_test]
@@ -1606,9 +1996,10 @@ fn multi_multi_features() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1626,7 +2017,7 @@ fn multi_multi_features() {
         )
         .build();
 
-    p.cargo("build --features a --features").arg("b c").run();
+    p.cargo("check --features a --features").arg("b c").run();
 }
 
 #[cargo_test]
@@ -1635,9 +2026,10 @@ fn cli_parse_ok() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -1709,6 +2101,7 @@ fn all_features_virtual_ws() {
                 [package]
                 name = "b"
                 version = "0.1.0"
+                edition = "2015"
 
                 [features]
                 default = ["f3"]
@@ -1731,14 +2124,30 @@ fn all_features_virtual_ws() {
         )
         .build();
 
-    p.cargo("run").with_stdout("f1\n").run();
+    p.cargo("run")
+        .with_stdout_data(str![[r#"
+f1
+
+"#]])
+        .run();
     p.cargo("run --all-features")
-        .with_stdout("f1\nf2\nf3\nf4\n")
+        .with_stdout_data(str![[r#"
+f1
+f2
+f3
+f4
+
+"#]])
         .run();
     // In `a`, it behaves differently. :(
     p.cargo("run --all-features")
         .cwd("a")
-        .with_stdout("f1\nf2\nf3\n")
+        .with_stdout_data(str![[r#"
+f1
+f2
+f3
+
+"#]])
         .run();
 }
 
@@ -1752,6 +2161,7 @@ fn slash_optional_enables() {
             [package]
             name = "foo"
             version = "0.1.0"
+                edition = "2015"
 
             [dependencies]
             dep = {path="dep", optional=true}
@@ -1770,6 +2180,7 @@ fn slash_optional_enables() {
             [package]
             name = "dep"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             feat = []
@@ -1786,7 +2197,11 @@ fn slash_optional_enables() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr_contains("[..]dep not set[..]")
+        .with_stderr_data(str![[r#"
+...
+[ERROR] dep not set
+...
+"#]])
         .run();
 
     p.cargo("check --features dep/feat").run();
@@ -1852,20 +2267,26 @@ fn registry_summary_order_doesnt_matter() {
         .build();
 
     p.cargo("run")
-        .with_stderr(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 2 packages to highest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] [..]
-[DOWNLOADED] [..]
+[DOWNLOADED] bar v0.1.0 (registry `dummy-registry`)
+[DOWNLOADED] dep v0.1.0 (registry `dummy-registry`)
 [COMPILING] dep v0.1.0
 [COMPILING] bar v0.1.0
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `target/debug/foo[EXE]`
-",
+
+"#]]
+            .unordered(),
         )
-        .with_stdout("it works")
+        .with_stdout_data(str![[r#"
+it works
+
+"#]])
         .run();
 }
 
@@ -1881,9 +2302,10 @@ fn nonexistent_required_features() {
         .file(
             "Cargo.toml",
             r#"
-            [project]
+            [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
             [features]
             existing = []
             fancy = ["optional_dependency"]
@@ -1905,125 +2327,13 @@ fn nonexistent_required_features() {
         .file("examples/ololo.rs", "fn main() {}")
         .build();
 
-    p.cargo("build --examples")
-        .with_stderr_contains(
-            "\
-[WARNING] invalid feature `not_present` in required-features of target `ololo`: \
-    `not_present` is not present in [features] section
-[WARNING] invalid feature `required_dependency/not_existing` in required-features \
-    of target `ololo`: feature `not_existing` does not exist in package \
-    `required_dependency v0.1.0`
-[WARNING] invalid feature `not_specified_dependency/some_feature` in required-features \
-    of target `ololo`: dependency `not_specified_dependency` does not exist
-",
-        )
-        .run();
-}
-
-#[cargo_test]
-fn invalid_feature_names_warning() {
-    // Warnings for more restricted feature syntax.
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.1.0"
-
-                [features]
-                # Some valid, but unusual names, shouldn't warn.
-                "c++17" = []
-                "128bit" = []
-                "_foo" = []
-                "feat-name" = []
-                "feat_name" = []
-                "foo.bar" = []
-
-                # Invalid names.
-                "+foo" = []
-                "-foo" = []
-                ".foo" = []
-                "foo:bar" = []
-                "foo?" = []
-                "?foo" = []
-                "ⒶⒷⒸ" = []
-                "a¼" = []
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
-
-    // Unfortunately the warnings are duplicated due to the Summary being
-    // loaded twice (once in the Workspace, and once in PackageRegistry) and
-    // Cargo does not have a de-duplication system. This should probably be
-    // OK, since I'm not expecting this to affect anyone.
-    p.cargo("check")
-        .with_stderr("\
-[WARNING] invalid character `+` in feature `+foo` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `-` in feature `-foo` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `.` in feature `.foo` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `?` in feature `?foo` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `¼` in feature `a¼` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `:` in feature `foo:bar` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `?` in feature `foo?` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `Ⓐ` in feature `ⒶⒷⒸ` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `Ⓑ` in feature `ⒶⒷⒸ` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `Ⓒ` in feature `ⒶⒷⒸ` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `+` in feature `+foo` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `-` in feature `-foo` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `.` in feature `.foo` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `?` in feature `?foo` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `¼` in feature `a¼` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `:` in feature `foo:bar` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `?` in feature `foo?` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `Ⓐ` in feature `ⒶⒷⒸ` in package foo v0.1.0 ([ROOT]/foo), the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `Ⓑ` in feature `ⒶⒷⒸ` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[WARNING] invalid character `Ⓒ` in feature `ⒶⒷⒸ` in package foo v0.1.0 ([ROOT]/foo), characters must be Unicode XID characters, `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
-This was previously accepted but is being phased out; it will become a hard error in a future release.
-For more information, see issue #8813 <https://github.com/rust-lang/cargo/issues/8813>, and please leave a comment if this will be a problem for your project.
-[CHECKING] foo v0.1.0 [..]
-[FINISHED] [..]
-")
-        .run();
+    p.cargo("check --examples").with_stderr_data(str![[r#"
+...
+[WARNING] invalid feature `not_present` in required-features of target `ololo`: `not_present` is not present in [features] section
+[WARNING] invalid feature `required_dependency/not_existing` in required-features of target `ololo`: feature `not_existing` does not exist in package `required_dependency v0.1.0`
+[WARNING] invalid feature `not_specified_dependency/some_feature` in required-features of target `ololo`: dependency `not_specified_dependency` does not exist
+...
+"#]]).run();
 }
 
 #[cargo_test]
@@ -2036,6 +2346,66 @@ fn invalid_feature_names_error() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
+
+                [features]
+                # Invalid start character.
+                "+foo" = []
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] invalid character `+` in feature name: `+foo`, the first character must be a Unicode XID start character or digit (most letters or `_` or `0` to `9`)
+ --> Cargo.toml:9:17
+  |
+9 |                 "+foo" = []
+  |                 ^^^^^^
+
+"#]])
+        .run();
+
+    p.change_file(
+        "Cargo.toml",
+        r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [features]
+            # Invalid continue character.
+            "a&b" = []
+        "#,
+    );
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] invalid character `&` in feature name: `a&b`, characters must be Unicode XID characters, '-', `+`, or `.` (numbers, `+`, `-`, `_`, `.`, or most letters)
+ --> Cargo.toml:9:13
+  |
+9 |             "a&b" = []
+  |             ^^^^^
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn invalid_feature_name_slash_error() {
+    // Errors for more restricted feature syntax.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
 
                 [features]
                 "foo/bar" = []
@@ -2046,13 +2416,357 @@ fn invalid_feature_names_error() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[CWD]/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] invalid character `/` in feature name: `foo/bar`, feature name is not allowed to contain slashes
+ --> Cargo.toml:8:17
+  |
+8 |                 "foo/bar" = []
+  |                 ^^^^^^^^^
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn dont_demand_not_required_dep() {
+    Package::new("not-required", "1.0.0").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["feat"]
+feat = ["dep:not-required"]
+
+[target.'cfg(false)'.dependencies]
+not-required = { version = "1.0", optional = true }
+
+[[example]]
+name = "demo"
+required-features = ["feat"]
+"#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .file("examples/demo.rs", "fn main() {}")
+        .build();
+
+    let host = rustc_host();
+    p.cargo(&format!("fetch --target={host}")).run();
+    p.cargo(&format!("check --target={host} --examples --frozen"))
+        .run();
+}
+
+#[cargo_test]
+fn feature_metadata() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                cargo-features = ["feature-metadata"]
+
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [features]
+                a = []
+                b = []
+                c = { enables = ["a", "b"] }
+            "#,
+        )
+        .file(
+            "src/main.rs",
+            r#"
+                fn main() {
+                    #[cfg(not(all(feature = "a", feature = "b")))]
+                    compile_error!("Cargo features `a` and `b` must be enabled");
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("check --features c")
+        .masquerade_as_nightly_cargo(&["feature-metadata"])
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn feature_metadata_is_unstable() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [features]
+                a = { enables = [] }
+            "#,
+        )
+        .file("src/main.rs", "")
+        .build();
+
+    p.cargo("check --features a")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
-  feature named `foo/bar` is not allowed to contain slashes
-",
+  feature `feature-metadata` is required
+
+  The package requires the Cargo feature called `feature-metadata`, but that feature is not stabilized in this version of Cargo ([..]).
+  Consider trying a newer version of Cargo (this may require the nightly release).
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#feature_metadata for more information about the status of this feature.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn feature_metadata_missing_enables() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                cargo-features = ["feature-metadata"]
+
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [features]
+                foo = {}
+            "#,
         )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["feature-metadata"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] missing field `enables`
+ --> Cargo.toml:9:23
+  |
+9 |                 foo = {}
+  |                       ^^
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn feature_metadata_empty_enables() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                cargo-features = ["feature-metadata"]
+
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [features]
+                foo = { enables = [] }
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["feature-metadata"])
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn unused_keys_in_feature_metadata() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                cargo-features = ["feature-metadata"]
+
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [features]
+                foo = { enables = ["bar"], a = false, b = true }
+                bar = []
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["feature-metadata"])
+        .with_stderr_data(str![[r#"
+[WARNING] Cargo.toml: unused manifest key: `features.foo.a`
+[WARNING] Cargo.toml: unused manifest key: `features.foo.b`
+[WARNING] `foo` (manifest) generated 2 warnings
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn package_preserves_feature_metadata() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                cargo-features = ["feature-metadata"]
+
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [features]
+                a = []
+                b = []
+                c = { enables = ["a", "dev-only/feature", "b"], doc = "Enables a and b." }
+                empty = { enables = [], doc = "Enables nothing." }
+                only_enables = { enables = ["a"] }
+
+                [dev-dependencies]
+                dev-only = { path = "dev-only" }
+            "#,
+        )
+        .file("src/main.rs", "")
+        .file(
+            "dev-only/Cargo.toml",
+            r#"
+                [package]
+                name = "dev-only"
+                version = "0.0.0"
+
+                [features]
+                feature = []
+            "#,
+        )
+        .file("dev-only/src/lib.rs", "")
+        .build();
+
+    p.cargo("package --no-verify")
+        .masquerade_as_nightly_cargo(&["feature-metadata"])
+        .with_stderr_data(str![[r#"
+[WARNING] manifest has no description, license, license-file, documentation, homepage or repository
+ |
+ = [NOTE] see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
+[PACKAGING] foo v0.0.0 ([ROOT]/foo)
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+
+"#]])
+        .run();
+    let f = File::open(&p.root().join("target/package/foo-0.0.0.crate")).unwrap();
+    let normalized_manifest = str![[r#"
+...
+[features]
+a = []
+b = []
+
+[features.c]
+enables = [
+    "a",
+    "b",
+]
+doc = "Enables a and b."
+
+[features.empty]
+enables = []
+doc = "Enables nothing."
+
+[features.only_enables]
+enables = ["a"]
+
+...
+"#]];
+    validate_crate_contents(
+        f,
+        "foo-0.0.0.crate",
+        &["Cargo.lock", "Cargo.toml", "Cargo.toml.orig", "src/main.rs"],
+        [("Cargo.toml", normalized_manifest)],
+    );
+}
+
+#[cargo_test]
+fn feature_documentation_is_unstable() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [features]
+                foo = { enables = [], doc = "Enables foo." }
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `feature-metadata` is required
+
+  The package requires the Cargo feature called `feature-metadata`, but that feature is not stabilized in this version of Cargo ([..]).
+  Consider trying a newer version of Cargo (this may require the nightly release).
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#feature_metadata for more information about the status of this feature.
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn feature_has_documentation() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                cargo-features = ["feature-metadata"]
+
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [features]
+                foo = { enables = [], doc = "Enables foo." }
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .build();
+
+    p.cargo("check")
+        .masquerade_as_nightly_cargo(&["feature-metadata"])
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }

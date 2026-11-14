@@ -1,9 +1,12 @@
 //! Tests for feature selection on the command-line.
 
-use super::features2::switch_to_resolver_2;
-use cargo_test_support::registry::{Dependency, Package};
-use cargo_test_support::{basic_manifest, project};
 use std::fmt::Write;
+
+use crate::prelude::*;
+use cargo_test_support::registry::{Dependency, Package};
+use cargo_test_support::{basic_manifest, project, str};
+
+use super::features2::switch_to_resolver_2;
 
 #[cargo_test]
 fn virtual_no_default_features() {
@@ -23,6 +26,7 @@ fn virtual_no_default_features() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             dep1 = {version = "1.0", optional = true}
@@ -38,6 +42,7 @@ fn virtual_no_default_features() {
             [package]
             name = "b"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             default = ["f1"]
@@ -54,38 +59,66 @@ fn virtual_no_default_features() {
         .build();
 
     p.cargo("check --no-default-features")
-        .with_stderr_unordered(
-            "\
-[UPDATING] [..]
-[CHECKING] a v0.1.0 [..]
-[CHECKING] b v0.1.0 [..]
-[FINISHED] [..]
-",
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[CHECKING] a v0.1.0 ([ROOT]/foo/a)
+[CHECKING] b v0.1.0 ([ROOT]/foo/b)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 
     p.cargo("check --features foo")
         .with_status(101)
-        .with_stderr(
-            "[ERROR] none of the selected packages contains these features: foo, did you mean: f1?",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] none of the selected packages contains this feature: foo
+selected packages: a, b
+[HELP] there is a similarly named feature: f1
+
+"#]])
         .run();
 
     p.cargo("check --features a/dep1,b/f1,b/f2,f2")
         .with_status(101)
-        .with_stderr("[ERROR] none of the selected packages contains these features: b/f2, f2, did you mean: f1?")
+        .with_stderr_data(str![[r#"
+[ERROR] none of the selected packages contains these features: b/f2, f2
+selected packages: a, b
+[HELP] there is a similarly named feature: f1
+
+"#]])
         .run();
 
     p.cargo("check --features a/dep,b/f1,b/f2,f2")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr("[ERROR] none of the selected packages contains these features: a/dep, b/f2, f2, did you mean: a/dep1, f1?")
+        .with_stderr_data(str![[r#"
+[ERROR] none of the selected packages contains these features: a/dep, b/f2, f2
+selected packages: a, b
+[HELP] there are similarly named features: a/dep1, f1
+
+"#]])
         .run();
 
     p.cargo("check --features a/dep,a/dep1")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr("[ERROR] none of the selected packages contains these features: a/dep, did you mean: b/f1?")
+        .with_stderr_data(str![[r#"
+[ERROR] none of the selected packages contains this feature: a/dep
+selected packages: a, b
+[HELP] there is a similarly named feature: b/f1
+
+"#]])
+        .run();
+
+    p.cargo("check -p b --features=dep1")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] the package 'b' does not contain this feature: dep1
+[HELP] package with the missing feature: a
+
+"#]])
         .run();
 }
 
@@ -98,6 +131,7 @@ fn virtual_typo_member_feature() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
             resolver = "2"
 
             [features]
@@ -107,11 +141,12 @@ fn virtual_typo_member_feature() {
         .file("src/lib.rs", "")
         .build()
         .cargo("check --features a/deny-warning")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "[ERROR] none of the selected packages contains these features: a/deny-warning, did you mean: a/deny-warnings?",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] the package 'a' does not contain this feature: a/deny-warning
+[HELP] there is a similarly named feature: a/deny-warnings
+
+"#]])
         .run();
 }
 
@@ -132,6 +167,7 @@ fn virtual_features() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             f1 = []
@@ -149,12 +185,14 @@ fn virtual_features() {
         .build();
 
     p.cargo("check --features f1")
-        .with_stderr_unordered(
-            "\
-[CHECKING] a [..]
-[CHECKING] b [..]
-[FINISHED] [..]
-",
+        .with_stderr_data(
+            str![[r#"
+[CHECKING] a v0.1.0 ([ROOT]/foo/a)
+[CHECKING] b v0.1.0 ([ROOT]/foo/b)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -176,6 +214,7 @@ fn virtual_with_specific() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             f1 = []
@@ -185,9 +224,9 @@ fn virtual_with_specific() {
         .file(
             "a/src/lib.rs",
             r#"
-            #[cfg(not_feature = "f1")]
+            #[cfg(not(feature = "f1"))]
             compile_error!{"f1 is missing"}
-            #[cfg(not_feature = "f2")]
+            #[cfg(not(feature = "f2"))]
             compile_error!{"f2 is missing"}
             "#,
         )
@@ -197,6 +236,7 @@ fn virtual_with_specific() {
             [package]
             name = "b"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             f2 = []
@@ -206,21 +246,23 @@ fn virtual_with_specific() {
         .file(
             "b/src/lib.rs",
             r#"
-            #[cfg(not_feature = "f2")]
+            #[cfg(not(feature = "f2"))]
             compile_error!{"f2 is missing"}
-            #[cfg(not_feature = "f3")]
+            #[cfg(not(feature = "f3"))]
             compile_error!{"f3 is missing"}
             "#,
         )
         .build();
 
     p.cargo("check -p a -p b --features f1,f2,f3")
-        .with_stderr_unordered(
-            "\
-[CHECKING] a [..]
-[CHECKING] b [..]
-[FINISHED] [..]
-",
+        .with_stderr_data(
+            str![[r#"
+[CHECKING] a v0.1.0 ([ROOT]/foo/a)
+[CHECKING] b v0.1.0 ([ROOT]/foo/b)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -237,6 +279,7 @@ fn other_member_from_current() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             bar = { path="bar", features=["f3"] }
@@ -252,6 +295,7 @@ fn other_member_from_current() {
             [package]
             name = "bar"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             f1 = []
@@ -285,28 +329,50 @@ fn other_member_from_current() {
 
     // Old behavior.
     p.cargo("run -p bar --features f1")
-        .with_stdout("f3f4")
+        .with_stdout_data(str![[r#"
+f3f4
+
+"#]])
         .run();
 
     p.cargo("run -p bar --features f1,f2")
         .with_status(101)
-        .with_stderr("[ERROR] Package `foo[..]` does not have the feature `f2`")
+        .with_stderr_data(str![[r#"
+[ERROR] package `foo v0.1.0 ([ROOT]/foo)` does not have the feature `f2`
+
+[HELP] a feature with a similar name exists: `f1`
+
+"#]])
         .run();
 
     p.cargo("run -p bar --features bar/f1")
-        .with_stdout("f1f3")
+        .with_stdout_data(str![[r#"
+f1f3
+
+"#]])
         .run();
 
     // New behavior.
     switch_to_resolver_2(&p);
-    p.cargo("run -p bar --features f1").with_stdout("f1").run();
+    p.cargo("run -p bar --features f1")
+        .with_stdout_data(str![[r#"
+f1
+
+"#]])
+        .run();
 
     p.cargo("run -p bar --features f1,f2")
-        .with_stdout("f1f2")
+        .with_stdout_data(str![[r#"
+f1f2
+
+"#]])
         .run();
 
     p.cargo("run -p bar --features bar/f1")
-        .with_stdout("f1")
+        .with_stdout_data(str![[r#"
+f1
+
+"#]])
         .run();
 }
 
@@ -319,6 +385,7 @@ fn feature_default_resolver() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             test = []
@@ -338,17 +405,199 @@ fn feature_default_resolver() {
 
     p.cargo("check --features testt")
         .with_status(101)
-        .with_stderr("[ERROR] Package `a[..]` does not have the feature `testt`")
+        .with_stderr_data(str![[r#"
+[ERROR] package `a v0.1.0 ([ROOT]/foo)` does not have the feature `testt`
+
+[HELP] a feature with a similar name exists: `test`
+
+"#]])
         .run();
 
     p.cargo("run --features test")
         .with_status(0)
-        .with_stdout("feature set")
+        .with_stdout_data(str![[r#"
+feature set
+
+"#]])
         .run();
 
     p.cargo("run --features a/test")
         .with_status(101)
-        .with_stderr("[ERROR] package `a[..]` does not have a dependency named `a`")
+        .with_stderr_data(str![[r#"
+[ERROR] package `a v0.1.0 ([ROOT]/foo)` does not have a dependency named `a`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn command_line_optional_dep() {
+    // Enabling a dependency used as a `dep:` errors helpfully
+    Package::new("bar", "1.0.0").publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "a"
+            version = "0.1.0"
+            edition = "2015"
+
+            [features]
+            foo = ["dep:bar"]
+
+            [dependencies]
+            bar = { version = "1.0.0", optional = true }
+            "#,
+        )
+        .file("src/lib.rs", r#""#)
+        .build();
+
+    p.cargo("check --features bar")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[ERROR] package `a v0.1.0 ([ROOT]/foo)` does not have feature `bar`
+
+[HELP] an optional dependency with that name exists, but the `features` table includes it with the "dep:" syntax so it does not have an implicit feature with that name
+Dependency `bar` would be enabled by these features:
+	- `foo`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn command_line_optional_dep_three_options() {
+    // Trying to enable an optional dependency used as a `dep:` errors helpfully, when there are three features which would enable the dependency
+    Package::new("bar", "1.0.0").publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "a"
+            version = "0.1.0"
+            edition = "2015"
+
+            [features]
+            f1 = ["dep:bar"]
+            f2 = ["dep:bar"]
+            f3 = ["dep:bar"]
+
+            [dependencies]
+            bar = { version = "1.0.0", optional = true }
+            "#,
+        )
+        .file("src/lib.rs", r#""#)
+        .build();
+
+    p.cargo("check --features bar")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[ERROR] package `a v0.1.0 ([ROOT]/foo)` does not have feature `bar`
+
+[HELP] an optional dependency with that name exists, but the `features` table includes it with the "dep:" syntax so it does not have an implicit feature with that name
+Dependency `bar` would be enabled by these features:
+	- `f1`
+	- `f2`
+	- `f3`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn command_line_optional_dep_many_options() {
+    // Trying to enable an optional dependency used as a `dep:` errors helpfully, when there are many features which would enable the dependency
+    Package::new("bar", "1.0.0").publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "a"
+            version = "0.1.0"
+            edition = "2015"
+
+            [features]
+            f1 = ["dep:bar"]
+            f2 = ["dep:bar"]
+            f3 = ["dep:bar"]
+            f4 = ["dep:bar"]
+
+            [dependencies]
+            bar = { version = "1.0.0", optional = true }
+            "#,
+        )
+        .file("src/lib.rs", r#""#)
+        .build();
+
+    p.cargo("check --features bar")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[ERROR] package `a v0.1.0 ([ROOT]/foo)` does not have feature `bar`
+
+[HELP] an optional dependency with that name exists, but the `features` table includes it with the "dep:" syntax so it does not have an implicit feature with that name
+Dependency `bar` would be enabled by these features:
+	- `f1`
+	- `f2`
+	- `f3`
+	  ...
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn command_line_optional_dep_many_paths() {
+    // Trying to enable an optional dependency used as a `dep:` errors helpfully, when a features would enable the dependency in multiple ways
+    Package::new("bar", "1.0.0")
+        .feature("a", &[])
+        .feature("b", &[])
+        .feature("c", &[])
+        .feature("d", &[])
+        .publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "a"
+            version = "0.1.0"
+            edition = "2015"
+
+            [features]
+            f1 = ["dep:bar", "bar/a", "bar/b"] # Remove the implicit feature
+            f2 = ["bar/b", "bar/c"] # Overlaps with previous
+            f3 = ["bar/d"] # No overlap with previous
+
+            [dependencies]
+            bar = { version = "1.0.0", optional = true }
+            "#,
+        )
+        .file("src/lib.rs", r#""#)
+        .build();
+
+    p.cargo("check --features bar")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[ERROR] package `a v0.1.0 ([ROOT]/foo)` does not have feature `bar`
+
+[HELP] an optional dependency with that name exists, but the `features` table includes it with the "dep:" syntax so it does not have an implicit feature with that name
+Dependency `bar` would be enabled by these features:
+	- `f1`
+	- `f2`
+	- `f3`
+
+"#]])
         .run();
 }
 
@@ -369,6 +618,7 @@ fn virtual_member_slash() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             b = {path="../b", optional=true}
@@ -398,6 +648,7 @@ fn virtual_member_slash() {
             [package]
             name = "b"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             bfeat = []
@@ -414,35 +665,56 @@ fn virtual_member_slash() {
 
     p.cargo("check -p a")
         .with_status(101)
-        .with_stderr_contains("[..]f1 is set[..]")
+        .with_stderr_data(str![[r#"
+...
+[ERROR] f1 is set
+...
+"#]])
         .with_stderr_does_not_contain("[..]f2 is set[..]")
         .with_stderr_does_not_contain("[..]b is set[..]")
         .run();
 
     p.cargo("check -p a --features a/f1")
         .with_status(101)
-        .with_stderr_contains("[..]f1 is set[..]")
+        .with_stderr_data(str![[r#"
+...
+[ERROR] f1 is set
+...
+"#]])
         .with_stderr_does_not_contain("[..]f2 is set[..]")
         .with_stderr_does_not_contain("[..]b is set[..]")
         .run();
 
     p.cargo("check -p a --features a/f2")
         .with_status(101)
-        .with_stderr_contains("[..]f1 is set[..]")
-        .with_stderr_contains("[..]f2 is set[..]")
+        .with_stderr_data(str![[r#"
+...
+[ERROR] f1 is set
+...
+[ERROR] f2 is set
+...
+"#]])
         .with_stderr_does_not_contain("[..]b is set[..]")
         .run();
 
     p.cargo("check -p a --features b/bfeat")
         .with_status(101)
-        .with_stderr_contains("[..]bfeat is set[..]")
+        .with_stderr_data(str![[r#"
+...
+[ERROR] bfeat is set
+...
+"#]])
         .run();
 
     p.cargo("check -p a --no-default-features").run();
 
     p.cargo("check -p a --no-default-features --features b")
         .with_status(101)
-        .with_stderr_contains("[..]b is set[..]")
+        .with_stderr_data(str![[r#"
+...
+[ERROR] b is set
+...
+"#]])
         .run();
 }
 
@@ -457,6 +729,7 @@ fn non_member() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
             resolver = "2"
 
             [dependencies]
@@ -469,32 +742,74 @@ fn non_member() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build -p dep --features f1")
+    p.cargo("check -p dep --features f1")
         .with_status(101)
-        .with_stderr(
-            "[UPDATING][..]\n[ERROR] cannot specify features for packages outside of workspace",
+        .with_stderr_data(str![[r#"
+[ERROR] cannot specify features for packages outside of workspace
+
+[HELP] a workspace member with a similar name exists: `foo`
+
+"#]])
+        .run();
+
+    p.cargo("check -p dep --all-features")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] cannot specify features for packages outside of workspace
+
+[HELP] a workspace member with a similar name exists: `foo`
+
+"#]])
+        .run();
+
+    p.cargo("check -p dep --no-default-features")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] cannot specify features for packages outside of workspace
+
+[HELP] a workspace member with a similar name exists: `foo`
+
+"#]])
+        .run();
+
+    p.cargo("check -p dep")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[DOWNLOADING] crates ...
+[DOWNLOADED] dep v1.0.0 (registry `dummy-registry`)
+[CHECKING] dep v1.0.0
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn non_member_typo() {
+    // -p with a mistyped package name shows a helpful error hint
+    // about similarly named workspace members.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [workspace]
+            members = ["bar"]
+            resolver = "2"
+            "#,
         )
-        .run();
+        .file("bar/Cargo.toml", &basic_manifest("bar", "1.0.0"))
+        .file("bar/src/lib.rs", "")
+        .build();
 
-    p.cargo("build -p dep --all-features")
+    p.cargo("build -p barr --all-features")
         .with_status(101)
-        .with_stderr("[ERROR] cannot specify features for packages outside of workspace")
-        .run();
+        .with_stderr_data(str![[r#"
+[ERROR] cannot specify features for packages outside of workspace
 
-    p.cargo("build -p dep --no-default-features")
-        .with_status(101)
-        .with_stderr("[ERROR] cannot specify features for packages outside of workspace")
-        .run();
+[HELP] a workspace member with a similar name exists: `bar`
 
-    p.cargo("build -p dep")
-        .with_stderr(
-            "\
-[DOWNLOADING] [..]
-[DOWNLOADED] [..]
-[COMPILING] dep [..]
-[FINISHED] [..]
-",
-        )
+"#]])
         .run();
 }
 
@@ -515,6 +830,7 @@ fn resolver1_member_features() {
                 [package]
                 name = "member1"
                 version = "0.1.0"
+                edition = "2015"
 
                 [features]
                 m1-feature = []
@@ -536,13 +852,21 @@ fn resolver1_member_features() {
 
     p.cargo("run -p member1 --features member1/m1-feature")
         .cwd("member2")
-        .with_stdout("m1-feature set")
+        .with_stdout_data(str![[r#"
+m1-feature set
+
+"#]])
         .run();
 
     p.cargo("check -p member1 --features member1/m2-feature")
         .cwd("member2")
         .with_status(101)
-        .with_stderr("[ERROR] Package `member1[..]` does not have the feature `m2-feature`")
+        .with_stderr_data(str![[r#"
+[ERROR] package `member1 v0.1.0 ([ROOT]/foo/member1)` does not have the feature `m2-feature`
+
+[HELP] a feature with a similar name exists: `m1-feature`
+
+"#]])
         .run();
 }
 
@@ -561,7 +885,11 @@ fn non_member_feature() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 resolver = "{}"
+
+                [lints.cargo]
+                default = "allow"
 
                 [dependencies]
             "#,
@@ -584,35 +912,32 @@ fn non_member_feature() {
     ///////////////////////// V1 non-optional
     eprintln!("V1 non-optional");
     p.cargo("check -p bar")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [CHECKING] bar v1.0.0
-[FINISHED] [..]
-",
-        )
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     // TODO: This should not be allowed (future warning?)
     p.cargo("check --features bar/jazz")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] jazz v1.0.0 [..]
+[DOWNLOADED] jazz v1.0.0 (registry `dummy-registry`)
 [CHECKING] jazz v1.0.0
 [CHECKING] bar v1.0.0
-[CHECKING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     // TODO: This should not be allowed (future warning?)
     p.cargo("check -p bar --features bar/jazz -v")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [FRESH] jazz v1.0.0
 [FRESH] bar v1.0.0
-[FINISHED] [..]
-",
-        )
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     ///////////////////////// V1 optional
@@ -623,33 +948,30 @@ fn non_member_feature() {
     // practice, so I'm not going to put much effort into improving it.
     p.cargo("check -p bar")
         .with_status(101)
-        .with_stderr(
-            "\
-error: package ID specification `bar` did not match any packages
+        .with_stderr_data(str![[r#"
+[ERROR] package ID specification `bar` did not match any packages
 
-<tab>Did you mean `foo`?
-",
-        )
+[HELP] a package with a similar name exists: `foo`
+
+"#]])
         .run();
 
     p.cargo("check -p bar --features bar -v")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [FRESH] bar v1.0.0
-[FINISHED] [..]
-",
-        )
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     // TODO: This should not be allowed (future warning?)
     p.cargo("check -p bar --features bar/jazz -v")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [FRESH] jazz v1.0.0
 [FRESH] bar v1.0.0
-[FINISHED] [..]
-",
-        )
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     ///////////////////////// V2 non-optional
@@ -657,26 +979,29 @@ error: package ID specification `bar` did not match any packages
     p.change_file("Cargo.toml", &make_toml("2", false));
     // TODO: This should not be allowed (future warning?)
     p.cargo("check --features bar/jazz -v")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [FRESH] jazz v1.0.0
 [FRESH] bar v1.0.0
-[FRESH] foo v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+[FRESH] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     p.cargo("check -p bar -v")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [FRESH] bar v1.0.0
-[FINISHED] [..]
-",
-        )
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     p.cargo("check -p bar --features bar/jazz")
         .with_status(101)
-        .with_stderr("error: cannot specify features for packages outside of workspace")
+        .with_stderr_data(str![[r#"
+[ERROR] cannot specify features for packages outside of workspace
+
+[HELP] a workspace member with a similar name exists: `foo`
+
+"#]])
         .run();
 
     ///////////////////////// V2 optional
@@ -684,25 +1009,39 @@ error: package ID specification `bar` did not match any packages
     p.change_file("Cargo.toml", &make_toml("2", true));
     p.cargo("check -p bar")
         .with_status(101)
-        .with_stderr(
-            "\
-error: package ID specification `bar` did not match any packages
+        .with_stderr_data(str![[r#"
+[ERROR] package ID specification `bar` did not match any packages
 
-<tab>Did you mean `foo`?
-",
-        )
+[HELP] a package with a similar name exists: `foo`
+
+"#]])
         .run();
     // New --features behavior does not look at cwd.
     p.cargo("check -p bar --features bar")
         .with_status(101)
-        .with_stderr("error: cannot specify features for packages outside of workspace")
+        .with_stderr_data(str![[r#"
+[ERROR] cannot specify features for packages outside of workspace
+
+[HELP] a workspace member with a similar name exists: `foo`
+
+"#]])
         .run();
     p.cargo("check -p bar --features bar/jazz")
         .with_status(101)
-        .with_stderr("error: cannot specify features for packages outside of workspace")
+        .with_stderr_data(str![[r#"
+[ERROR] cannot specify features for packages outside of workspace
+
+[HELP] a workspace member with a similar name exists: `foo`
+
+"#]])
         .run();
     p.cargo("check -p bar --features foo/bar")
         .with_status(101)
-        .with_stderr("error: cannot specify features for packages outside of workspace")
+        .with_stderr_data(str![[r#"
+[ERROR] cannot specify features for packages outside of workspace
+
+[HELP] a workspace member with a similar name exists: `foo`
+
+"#]])
         .run();
 }

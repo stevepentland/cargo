@@ -2,21 +2,28 @@ pub use self::imp::read2;
 
 #[cfg(unix)]
 mod imp {
+    use libc::{F_GETFL, F_SETFL, O_NONBLOCK, c_int, fcntl};
     use std::io;
     use std::io::prelude::*;
     use std::mem;
     use std::os::unix::prelude::*;
     use std::process::{ChildStderr, ChildStdout};
 
+    fn set_nonblock(fd: c_int) -> io::Result<()> {
+        let flags = unsafe { fcntl(fd, F_GETFL) };
+        if flags == -1 || unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn read2(
         mut out_pipe: ChildStdout,
         mut err_pipe: ChildStderr,
         data: &mut dyn FnMut(bool, &mut Vec<u8>, bool),
     ) -> io::Result<()> {
-        unsafe {
-            libc::fcntl(out_pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
-            libc::fcntl(err_pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
-        }
+        set_nonblock(out_pipe.as_raw_fd())?;
+        set_nonblock(err_pipe.as_raw_fd())?;
 
         let mut out_done = false;
         let mut err_done = false;
@@ -32,7 +39,7 @@ mod imp {
         let mut errfd = 1;
 
         while nfds > 0 {
-            // wait for either pipe to become readable using `select`
+            // wait for either pipe to become readable using `poll`
             let r = unsafe { libc::poll(fds.as_mut_ptr(), nfds, -1) };
             if r == -1 {
                 let err = io::Error::last_os_error();
@@ -81,10 +88,10 @@ mod imp {
     use std::process::{ChildStderr, ChildStdout};
     use std::slice;
 
+    use miow::Overlapped;
     use miow::iocp::{CompletionPort, CompletionStatus};
     use miow::pipe::NamedPipe;
-    use miow::Overlapped;
-    use winapi::shared::winerror::ERROR_BROKEN_PIPE;
+    use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
 
     struct Pipe<'a> {
         dst: &'a mut Vec<u8>,
@@ -134,17 +141,21 @@ mod imp {
 
     impl<'a> Pipe<'a> {
         unsafe fn new<P: IntoRawHandle>(p: P, dst: &'a mut Vec<u8>) -> Pipe<'a> {
+            // SAFETY: Handle must be owned, open, and closeable with CloseHandle.
+            let pipe = unsafe { NamedPipe::from_raw_handle(p.into_raw_handle()) };
             Pipe {
                 dst,
-                pipe: NamedPipe::from_raw_handle(p.into_raw_handle()),
+                pipe,
                 overlapped: Overlapped::zero(),
                 done: false,
             }
         }
 
         unsafe fn read(&mut self) -> io::Result<()> {
-            let dst = slice_to_end(self.dst);
-            match self.pipe.read_overlapped(dst, self.overlapped.raw()) {
+            let dst = unsafe { slice_to_end(self.dst) };
+            // SAFETY: The buffer must be valid until the end of the I/O,
+            // which is handled in `read2`.
+            match unsafe { self.pipe.read_overlapped(dst, self.overlapped.raw()) } {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
@@ -159,7 +170,7 @@ mod imp {
 
         unsafe fn complete(&mut self, status: &CompletionStatus) {
             let prev = self.dst.len();
-            self.dst.set_len(prev + status.bytes_transferred() as usize);
+            unsafe { self.dst.set_len(prev + status.bytes_transferred() as usize) };
             if status.bytes_transferred() == 0 {
                 self.done = true;
             }
@@ -173,6 +184,6 @@ mod imp {
         if v.capacity() == v.len() {
             v.reserve(1);
         }
-        slice::from_raw_parts_mut(v.as_mut_ptr().add(v.len()), v.capacity() - v.len())
+        unsafe { slice::from_raw_parts_mut(v.as_mut_ptr().add(v.len()), v.capacity() - v.len()) }
     }
 }

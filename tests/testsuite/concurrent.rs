@@ -7,11 +7,14 @@ use std::sync::mpsc::channel;
 use std::thread;
 use std::{env, str};
 
-use cargo_test_support::cargo_process;
+use crate::prelude::*;
+use crate::utils::cargo_process;
 use cargo_test_support::git;
-use cargo_test_support::install::{assert_has_installed_exe, cargo_home};
+use cargo_test_support::install::assert_has_installed_exe;
+use cargo_test_support::paths;
 use cargo_test_support::registry::Package;
-use cargo_test_support::{basic_manifest, execs, project, slow_cpu_multiplier};
+use cargo_test_support::str;
+use cargo_test_support::{basic_manifest, execs, project, retry, sleep_ms, slow_cpu_multiplier};
 
 fn pkg(name: &str, vers: &str) {
     Package::new(name, vers)
@@ -44,8 +47,8 @@ fn multiple_installs() {
     execs().run_output(&a);
     execs().run_output(&b);
 
-    assert_has_installed_exe(cargo_home(), "foo");
-    assert_has_installed_exe(cargo_home(), "bar");
+    assert_has_installed_exe(paths::cargo_home(), "foo");
+    assert_has_installed_exe(paths::cargo_home(), "bar");
 }
 
 #[cargo_test]
@@ -73,8 +76,8 @@ fn concurrent_installs() {
     execs().run_output(&a);
     execs().run_output(&b);
 
-    assert_has_installed_exe(cargo_home(), "foo");
-    assert_has_installed_exe(cargo_home(), "bar");
+    assert_has_installed_exe(paths::cargo_home(), "foo");
+    assert_has_installed_exe(paths::cargo_home(), "bar");
 }
 
 #[cargo_test]
@@ -102,7 +105,7 @@ fn one_install_should_be_bad() {
     execs().run_output(&a);
     execs().run_output(&b);
 
-    assert_has_installed_exe(cargo_home(), "foo");
+    assert_has_installed_exe(paths::cargo_home(), "foo");
 }
 
 #[cargo_test]
@@ -161,16 +164,18 @@ fn multiple_registry_fetches() {
     execs().run_output(&b);
 
     let suffix = env::consts::EXE_SUFFIX;
-    assert!(p
-        .root()
-        .join("a/target/debug")
-        .join(format!("foo{}", suffix))
-        .is_file());
-    assert!(p
-        .root()
-        .join("b/target/debug")
-        .join(format!("bar{}", suffix))
-        .is_file());
+    assert!(
+        p.root()
+            .join("a/target/debug")
+            .join(format!("foo{}", suffix))
+            .is_file()
+    );
+    assert!(
+        p.root()
+            .join("b/target/debug")
+            .join(format!("bar{}", suffix))
+            .is_file()
+    );
 }
 
 #[cargo_test]
@@ -351,9 +356,7 @@ fn same_project() {
 
 // Make sure that if Cargo dies while holding a lock that it's released and the
 // next Cargo to come in will take over cleanly.
-// older win versions don't support job objects, so skip test there
 #[cargo_test]
-#[cfg_attr(target_os = "windows", ignore)]
 fn killing_cargo_releases_the_lock() {
     let p = project()
         .file(
@@ -433,20 +436,20 @@ fn debug_release_ok() {
     let a = a.join().unwrap();
 
     execs()
-        .with_stderr_contains(
-            "\
-[COMPILING] foo v0.0.1 [..]
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+...
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run_output(&a);
     execs()
-        .with_stderr_contains(
-            "\
-[COMPILING] foo v0.0.1 [..]
-[FINISHED] release [optimized] target(s) in [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+...
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+
+"#]])
         .run_output(&b);
 }
 
@@ -506,4 +509,72 @@ fn no_deadlock_with_git_dependencies() {
         let result = rx.recv_timeout(slow_cpu_multiplier(30)).expect("Deadlock!");
         execs().run_output(&result);
     }
+}
+
+#[cargo_test]
+fn verbose_file_lock_blocking() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                edition = "2024"
+            "#,
+        )
+        .file("src/main.rs", "fn main() {}")
+        .file(
+            "build.rs",
+            r#"
+                fn main() {
+                    let blocking = std::env::var("BLOCKING").unwrap_or_default();
+                    if blocking == "1" {
+                        std::fs::write("blocking", "").unwrap();
+                        let path = std::path::Path::new("ready");
+                        loop {
+                            if path.exists() {
+                                break;
+                            } else {
+                                std::thread::sleep(std::time::Duration::from_millis(100))
+                            }
+                        }
+                    }
+                }
+            "#,
+        )
+        .build();
+
+    // start a build that will hold the lock on the build directory
+    let mut a = p
+        .cargo("check")
+        .build_command()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("BLOCKING", "1")
+        .spawn()
+        .unwrap();
+
+    // wait for the build script to start
+    retry(100, || p.root().join("blocking").exists().then_some(()));
+
+    let blocked_p = p
+        .cargo("check -vv")
+        .build_command()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("BLOCKING", "0")
+        .spawn()
+        .unwrap();
+
+    sleep_ms(500);
+
+    // release the lock on the build directory
+    std::fs::write(p.root().join("ready"), "").unwrap();
+
+    let blocked_p_otpt = blocked_p.wait_with_output().unwrap();
+
+    assert!(a.wait().unwrap().success());
+    execs()
+        .with_stderr_contains("[BLOCKING] waiting for file lock on build directory ([ROOT]/foo/target/debug/.cargo-build-lock)")
+        .run_output(&blocked_p_otpt);
 }

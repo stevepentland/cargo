@@ -1,101 +1,11 @@
 //! Tests for namespaced features.
 
-use super::features2::switch_to_resolver_2;
-use cargo_test_support::registry::{Dependency, Package};
+use crate::prelude::*;
+use cargo_test_support::registry::{Dependency, Package, RegistryBuilder};
+use cargo_test_support::str;
 use cargo_test_support::{project, publish};
 
-#[cargo_test]
-fn gated() {
-    // Need namespaced-features to use `dep:` syntax.
-    Package::new("bar", "1.0.0").publish();
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.1.0"
-
-                [dependencies]
-                bar = { version = "1.0", optional = true }
-
-                [features]
-                foo = ["dep:bar"]
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
-
-    p.cargo("check")
-        .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]/foo/Cargo.toml`
-
-Caused by:
-  namespaced features with the `dep:` prefix are only allowed on the nightly channel \
-  and requires the `-Z namespaced-features` flag on the command-line
-",
-        )
-        .run();
-}
-
-#[cargo_test]
-fn dependency_gate_ignored() {
-    // Dependencies with `dep:` features are ignored in the registry if not on nightly.
-    Package::new("baz", "1.0.0").publish();
-    Package::new("bar", "1.0.0")
-        .add_dep(Dependency::new("baz", "1.0").optional(true))
-        .feature("feat", &["dep:baz"])
-        .publish();
-    let p = project()
-        .file(
-            "Cargo.toml",
-            r#"
-                [package]
-                name = "foo"
-                version = "0.1.0"
-
-                [dependencies]
-                bar = "1.0"
-            "#,
-        )
-        .file("src/lib.rs", "")
-        .build();
-
-    p.cargo("check")
-        .masquerade_as_nightly_cargo()
-        .with_status(101)
-        .with_stderr(
-            "\
-[UPDATING] [..]
-[ERROR] no matching package named `bar` found
-location searched: registry `crates-io`
-required by package `foo v0.1.0 ([..]/foo)`
-",
-        )
-        .run();
-
-    // Publish a version without namespaced features, it should ignore 1.0.0
-    // an use this instead.
-    Package::new("bar", "1.0.1")
-        .add_dep(Dependency::new("baz", "1.0").optional(true))
-        .feature("feat", &["baz"])
-        .publish();
-    p.cargo("check")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[UPDATING] [..]
-[DOWNLOADING] crates ...
-[DOWNLOADED] bar [..]
-[CHECKING] bar v1.0.1
-[CHECKING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
-        .run();
-}
+use super::features2::switch_to_resolver_2;
 
 #[cargo_test]
 fn dependency_with_crate_syntax() {
@@ -112,27 +22,33 @@ fn dependency_with_crate_syntax() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = {version="1.0", features=["feat"]}
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("check -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[UPDATING] [..]
+    p.cargo("check")
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 2 packages to highest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] [..]
-[DOWNLOADED] [..]
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] baz v1.0.0 (registry `dummy-registry`)
 [CHECKING] baz v1.0.0
 [CHECKING] bar v1.0.0
-[CHECKING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -147,6 +63,7 @@ fn namespaced_invalid_feature() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [features]
@@ -156,17 +73,17 @@ fn namespaced_invalid_feature() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `bar` includes `baz` which is neither a dependency nor another feature
-",
-        )
+
+  [HELP] a feature with a similar name exists: `bar`
+
+"#]])
         .run();
 }
 
@@ -180,6 +97,7 @@ fn namespaced_invalid_dependency() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [features]
                 bar = ["dep:baz"]
@@ -188,17 +106,15 @@ fn namespaced_invalid_dependency() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `bar` includes `dep:baz`, but `baz` is not listed as a dependency
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -212,6 +128,7 @@ fn namespaced_non_optional_dependency() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [features]
                 bar = ["dep:baz"]
@@ -223,18 +140,16 @@ fn namespaced_non_optional_dependency() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `bar` includes `dep:baz`, but `baz` is not an optional dependency
   A non-optional dependency of the same name is defined; consider adding `optional = true` to its definition.
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -250,38 +165,39 @@ fn namespaced_implicit_feature() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [features]
                 bar = ["baz"]
 
                 [dependencies]
                 baz = { version = "0.1", optional = true }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("check -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[UPDATING] [..]
-[CHECKING] foo v0.0.1 [..]
-[FINISHED] [..]
-",
-        )
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
-    p.cargo("check -Z namespaced-features --features baz")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
+    p.cargo("check --features baz")
+        .with_stderr_data(str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] baz v0.1.0 [..]
+[DOWNLOADED] baz v0.1.0 (registry `dummy-registry`)
 [CHECKING] baz v0.1.0
-[CHECKING] foo v0.0.1 [..]
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -296,6 +212,7 @@ fn namespaced_shadowed_dep() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [features]
                 baz = []
@@ -307,18 +224,16 @@ fn namespaced_shadowed_dep() {
         .file("src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("build -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   optional dependency `baz` is not included in any feature
   Make sure that `dep:baz` is included in one of features in the [features] table.
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -333,6 +248,7 @@ fn namespaced_shadowed_non_optional() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [features]
                 baz = []
@@ -344,9 +260,7 @@ fn namespaced_shadowed_non_optional() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("check -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .run();
+    p.cargo("check").run();
 }
 
 #[cargo_test]
@@ -359,6 +273,7 @@ fn namespaced_implicit_non_optional() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [features]
                 bar = ["baz"]
@@ -370,15 +285,17 @@ fn namespaced_implicit_non_optional() {
         .file("src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("build -Z namespaced-features").masquerade_as_nightly_cargo().with_status(101).with_stderr(
-        "\
-[ERROR] failed to parse manifest at `[..]`
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `bar` includes `baz`, but `baz` is not an optional dependency
   A non-optional dependency of the same name is defined; consider adding `optional = true` to its definition.
-",
-    ).run();
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -393,12 +310,16 @@ fn namespaced_same_name() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
 
                 [features]
                 baz = ["dep:baz"]
 
                 [dependencies]
                 baz = { version = "0.1", optional = true }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file(
@@ -411,32 +332,32 @@ fn namespaced_same_name() {
         )
         .build();
 
-    p.cargo("run -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[UPDATING] [..]
-[COMPILING] foo v0.0.1 [..]
-[FINISHED] [..]
-[RUNNING] [..]
-",
-        )
-        .with_stdout("")
+    p.cargo("run")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .with_stdout_data("")
         .run();
 
-    p.cargo("run -Z namespaced-features --features baz")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
+    p.cargo("run --features baz")
+        .with_stderr_data(str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] baz v0.1.0 [..]
+[DOWNLOADED] baz v0.1.0 (registry `dummy-registry`)
 [COMPILING] baz v0.1.0
-[COMPILING] foo v0.0.1 [..]
-[FINISHED] [..]
-[RUNNING] [..]
-",
-        )
-        .with_stdout("baz")
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+baz
+
+"#]])
         .run();
 }
 
@@ -453,6 +374,7 @@ fn no_implicit_feature() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 regex = { version = "1.0", optional = true }
@@ -460,6 +382,9 @@ fn no_implicit_feature() {
 
                 [features]
                 regex = ["dep:regex", "dep:lazy_static"]
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file(
@@ -467,51 +392,55 @@ fn no_implicit_feature() {
             r#"
                 fn main() {
                     if cfg!(feature = "regex") { println!("regex"); }
+                    #[allow(unexpected_cfgs)]
                     if cfg!(feature = "lazy_static") { println!("lazy_static"); }
                 }
             "#,
         )
         .build();
 
-    p.cargo("run -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[UPDATING] [..]
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
+    p.cargo("run")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 2 packages to highest compatible versions
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `target/debug/foo[EXE]`
-",
-        )
-        .with_stdout("")
+
+"#]])
+        .with_stdout_data("")
         .run();
 
-    p.cargo("run -Z namespaced-features --features regex")
-        .masquerade_as_nightly_cargo()
-        .with_stderr_unordered(
-            "\
+    p.cargo("run --features regex")
+        .with_stderr_data(
+            str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] regex v1.0.0 [..]
-[DOWNLOADED] lazy_static v1.0.0 [..]
+[DOWNLOADED] regex v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] lazy_static v1.0.0 (registry `dummy-registry`)
 [COMPILING] regex v1.0.0
 [COMPILING] lazy_static v1.0.0
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `target/debug/foo[EXE]`
-",
+
+"#]]
+            .unordered(),
         )
-        .with_stdout("regex")
+        .with_stdout_data(str![[r#"
+regex
+
+"#]])
         .run();
 
-    p.cargo("run -Z namespaced-features --features lazy_static")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[ERROR] Package `foo v0.1.0 [..]` does not have feature `lazy_static`. \
-It has an optional dependency with that name, but that dependency uses the \"dep:\" \
-syntax in the features table, so it does not have an implicit feature with that name.
-",
-        )
+    p.cargo("run --features lazy_static")
+        .with_stderr_data(str![[r#"
+[ERROR] package `foo v0.1.0 ([ROOT]/foo)` does not have feature `lazy_static`
+
+[HELP] an optional dependency with that name exists, but the `features` table includes it with the "dep:" syntax so it does not have an implicit feature with that name
+Dependency `lazy_static` would be enabled by these features:
+	- `regex`
+
+"#]])
         .with_status(101)
         .run();
 }
@@ -527,6 +456,7 @@ fn crate_syntax_bad_name() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version="1.0", optional=true }
@@ -538,17 +468,16 @@ fn crate_syntax_bad_name() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("check -Z namespaced-features --features dep:bar")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check --features dep:bar")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at [..]/foo/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] feature named `dep:bar` is not allowed to start with `dep:`
+  --> Cargo.toml:11:17
+   |
+11 |                 "dep:bar" = []
+   |                 ^^^^^^^^^
 
-Caused by:
-  feature named `dep:bar` is not allowed to start with `dep:`
-",
-        )
+"#]])
         .run();
 }
 
@@ -566,6 +495,7 @@ fn crate_syntax_in_dep() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version = "1.0", features = ["dep:baz"] }
@@ -574,18 +504,16 @@ fn crate_syntax_in_dep() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("check -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[CWD]/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `dep:baz` in dependency `bar` is not allowed to use explicit `dep:` syntax
-  If you want to enable [..]
-",
-        )
+  If you want to enable an optional dependency, specify the name of the optional dependency without the `dep:` prefix, or specify a feature from the dependency's `[features]` table that enables the optional dependency.
+
+"#]])
         .run();
 }
 
@@ -600,6 +528,7 @@ fn crate_syntax_cli() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version = "1.0", optional=true }
@@ -608,25 +537,21 @@ fn crate_syntax_cli() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("check -Z namespaced-features --features dep:bar")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check --features dep:bar")
         .with_status(101)
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [ERROR] feature `dep:bar` is not allowed to use explicit `dep:` syntax
-",
-        )
+
+"#]])
         .run();
 
     switch_to_resolver_2(&p);
-    p.cargo("check -Z namespaced-features --features dep:bar")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check --features dep:bar")
         .with_status(101)
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [ERROR] feature `dep:bar` is not allowed to use explicit `dep:` syntax
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -641,6 +566,7 @@ fn crate_required_features() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version = "1.0", optional=true }
@@ -653,16 +579,14 @@ fn crate_required_features() {
         .file("src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("check -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[UPDATING] [..]
-[ERROR] invalid feature `dep:bar` in required-features of target `foo`: \
-`dep:` prefixed feature values are not allowed in required-features
-",
-        )
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
+[ERROR] invalid feature `dep:bar` in required-features of target `foo`: `dep:` prefixed feature values are not allowed in required-features
+
+"#]])
         .run();
 }
 
@@ -677,6 +601,7 @@ fn json_exposed() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version = "1.0", optional=true }
@@ -685,48 +610,58 @@ fn json_exposed() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("metadata -Z namespaced-features --no-deps")
-        .masquerade_as_nightly_cargo()
-        .with_json(
-            r#"
-                {
-                  "packages": [
-                    {
-                      "name": "foo",
-                      "version": "0.1.0",
-                      "id": "foo 0.1.0 [..]",
-                      "license": null,
-                      "license_file": null,
-                      "description": null,
-                      "homepage": null,
-                      "documentation": null,
-                      "source": null,
-                      "dependencies": "{...}",
-                      "targets": "{...}",
-                      "features": {
-                        "bar": ["dep:bar"]
-                      },
-                      "manifest_path": "[..]foo/Cargo.toml",
-                      "metadata": null,
-                      "publish": null,
-                      "authors": [],
-                      "categories": [],
-                      "default_run": null,
-                      "keywords": [],
-                      "readme": null,
-                      "repository": null,
-                      "edition": "2015",
-                      "links": null
-                    }
-                  ],
-                  "workspace_members": "{...}",
-                  "resolve": null,
-                  "target_directory": "[..]foo/target",
-                  "version": 1,
-                  "workspace_root": "[..]foo",
-                  "metadata": null
-                }
-            "#,
+    p.cargo("metadata --no-deps")
+        .with_stdout_data(
+            str![[r#"
+{
+  "metadata": null,
+  "packages": [
+    {
+      "authors": [],
+      "categories": [],
+      "default_run": null,
+      "dependencies": "{...}",
+      "description": null,
+      "documentation": null,
+      "edition": "2015",
+      "features": {
+        "bar": [
+          "dep:bar"
+        ]
+      },
+      "homepage": null,
+      "id": "path+[ROOTURL]/foo#0.1.0",
+      "keywords": [],
+      "license": null,
+      "license_file": null,
+      "links": null,
+      "manifest_path": "[ROOT]/foo/Cargo.toml",
+      "metadata": null,
+      "name": "foo",
+      "publish": null,
+      "readme": null,
+      "repository": null,
+      "rust_version": null,
+      "source": null,
+      "targets": "{...}",
+      "version": "0.1.0"
+    }
+  ],
+  "resolve": null,
+  "target_directory": "[ROOT]/foo/target",
+  "build_directory": "[ROOT]/foo/target",
+  "version": 1,
+  "workspace_default_members": [
+    "path+[ROOTURL]/foo#0.1.0"
+  ],
+  "workspace_members": [
+    "path+[ROOTURL]/foo#0.1.0"
+  ],
+  "workspace_root": "[ROOT]/foo"
+}
+
+"#]]
+            .is_json(),
         )
         .run();
 }
@@ -752,6 +687,7 @@ fn crate_feature_with_explicit() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version="1.0", optional = true }
@@ -760,6 +696,9 @@ fn crate_feature_with_explicit() {
                 f1 = ["bar/bar_feat"]
                 bar = ["dep:bar", "f2"]
                 f2 = []
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file(
@@ -774,18 +713,17 @@ fn crate_feature_with_explicit() {
         )
         .build();
 
-    p.cargo("check -Z namespaced-features --features f1")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[UPDATING] [..]
+    p.cargo("check --features f1")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
-[DOWNLOADED] bar v1.0.0 [..]
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
 [CHECKING] bar v1.0.0
-[CHECKING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -801,6 +739,7 @@ fn optional_explicit_without_crate() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version = "1.0", optional = true }
@@ -813,18 +752,16 @@ fn optional_explicit_without_crate() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at [..]
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `feat2` includes `bar`, but `bar` is an optional dependency without an implicit feature
   Use `dep:bar` to enable the dependency.
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -843,6 +780,7 @@ fn tree() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version = "1.0", features = ["feat1"], optional=true }
@@ -855,73 +793,67 @@ fn tree() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("tree -e features -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stdout("foo v0.1.0 ([ROOT]/foo)")
-        .run();
-
-    p.cargo("tree -e features --features a -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stdout(
-            "\
+    p.cargo("tree -e features")
+        .with_stdout_data(str![[r#"
 foo v0.1.0 ([ROOT]/foo)
-├── bar feature \"default\"
-│   └── bar v1.0.0
-│       └── baz feature \"default\"
-│           └── baz v1.0.0
-└── bar feature \"feat1\"
-    └── bar v1.0.0 (*)
-",
-        )
+
+"#]])
         .run();
 
-    p.cargo("tree -e features --features a -i bar -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stdout(
-            "\
+    p.cargo("tree -e features --features a")
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo)
+├── bar feature "default"
+│   └── bar v1.0.0
+│       └── baz feature "default"
+│           └── baz v1.0.0
+└── bar feature "feat1"
+    └── bar v1.0.0 (*)
+
+"#]])
+        .run();
+
+    p.cargo("tree -e features --features a -i bar")
+        .with_stdout_data(str![[r#"
 bar v1.0.0
-├── bar feature \"default\"
+├── bar feature "default"
 │   └── foo v0.1.0 ([ROOT]/foo)
-│       ├── foo feature \"a\" (command-line)
-│       ├── foo feature \"bar\"
-│       │   └── foo feature \"a\" (command-line)
-│       └── foo feature \"default\" (command-line)
-├── bar feature \"feat1\"
+│       ├── foo feature "a" (command-line)
+│       ├── foo feature "bar"
+│       │   └── foo feature "a" (command-line)
+│       └── foo feature "default" (command-line)
+├── bar feature "feat1"
 │   └── foo v0.1.0 ([ROOT]/foo) (*)
-└── bar feature \"feat2\"
-    └── foo feature \"a\" (command-line)
-",
-        )
+└── bar feature "feat2"
+    └── foo feature "a" (command-line)
+
+"#]])
         .run();
 
-    p.cargo("tree -e features --features bar -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stdout(
-            "\
+    p.cargo("tree -e features --features bar")
+        .with_stdout_data(str![[r#"
 foo v0.1.0 ([ROOT]/foo)
-├── bar feature \"default\"
+├── bar feature "default"
 │   └── bar v1.0.0
-│       └── baz feature \"default\"
+│       └── baz feature "default"
 │           └── baz v1.0.0
-└── bar feature \"feat1\"
+└── bar feature "feat1"
     └── bar v1.0.0 (*)
-",
-        )
+
+"#]])
         .run();
 
-    p.cargo("tree -e features --features bar -i bar -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stdout(
-            "\
+    p.cargo("tree -e features --features bar -i bar")
+        .with_stdout_data(str![[r#"
 bar v1.0.0
-├── bar feature \"default\"
+├── bar feature "default"
 │   └── foo v0.1.0 ([ROOT]/foo)
-│       ├── foo feature \"bar\" (command-line)
-│       └── foo feature \"default\" (command-line)
-└── bar feature \"feat1\"
+│       ├── foo feature "bar" (command-line)
+│       └── foo feature "default" (command-line)
+└── bar feature "feat1"
     └── foo v0.1.0 ([ROOT]/foo) (*)
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -936,6 +868,7 @@ fn tree_no_implicit() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = { version = "1.0", optional=true }
@@ -947,37 +880,38 @@ fn tree_no_implicit() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("tree -e features -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stdout("foo v0.1.0 ([ROOT]/foo)")
-        .run();
-
-    p.cargo("tree -e features --all-features -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stdout(
-            "\
+    p.cargo("tree -e features")
+        .with_stdout_data(str![[r#"
 foo v0.1.0 ([ROOT]/foo)
-└── bar feature \"default\"
-    └── bar v1.0.0
-",
-        )
+
+"#]])
         .run();
 
-    p.cargo("tree -e features -i bar --all-features -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stdout(
-            "\
+    p.cargo("tree -e features --all-features")
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo)
+└── bar feature "default"
+    └── bar v1.0.0
+
+"#]])
+        .run();
+
+    p.cargo("tree -e features -i bar --all-features")
+        .with_stdout_data(str![[r#"
 bar v1.0.0
-└── bar feature \"default\"
+└── bar feature "default"
     └── foo v0.1.0 ([ROOT]/foo)
-        └── foo feature \"a\" (command-line)
-",
-        )
+        ├── foo feature "a" (command-line)
+        └── foo feature "default" (command-line)
+
+"#]])
         .run();
 }
 
 #[cargo_test]
 fn publish_no_implicit() {
+    let registry = RegistryBuilder::new().http_api().http_index().build();
+
     // Does not include implicit features or dep: syntax on publish.
     Package::new("opt-dep1", "1.0.0").publish();
     Package::new("opt-dep2", "1.0.0").publish();
@@ -989,6 +923,7 @@ fn publish_no_implicit() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 description = "foo"
                 license = "MIT"
                 homepage = "https://example.com/"
@@ -1004,14 +939,20 @@ fn publish_no_implicit() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("publish --no-verify --token sekrit")
-        .with_stderr(
-            "\
-[UPDATING] [..]
-[PACKAGING] foo v0.1.0 [..]
-[UPLOADING] foo v0.1.0 [..]
-",
-        )
+    p.cargo("publish --no-verify")
+        .replace_crates_io(registry.index_url())
+        .with_stderr_data(str![[r#"
+[UPDATING] crates.io index
+[PACKAGING] foo v0.1.0 ([ROOT]/foo)
+[UPDATING] crates.io index
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[UPLOADING] foo v0.1.0 ([ROOT]/foo)
+[UPLOADED] foo v0.1.0 to registry `crates-io`
+[NOTE] waiting for foo v0.1.0 to be available at registry `crates-io`
+[HELP] you may press ctrl-c to skip waiting; the crate should be available shortly
+[PUBLISHED] foo v0.1.0 at registry `crates-io`
+
+"#]])
         .run();
 
     publish::validate_upload_with_contents(
@@ -1027,7 +968,6 @@ fn publish_no_implicit() {
               "kind": "normal",
               "name": "opt-dep1",
               "optional": true,
-              "registry": "https://github.com/rust-lang/crates.io-index",
               "target": null,
               "version_req": "^1.0"
             },
@@ -1037,7 +977,6 @@ fn publish_no_implicit() {
               "kind": "normal",
               "name": "opt-dep2",
               "optional": true,
-              "registry": "https://github.com/rust-lang/crates.io-index",
               "target": null,
               "version_req": "^1.0"
             }
@@ -1056,21 +995,48 @@ fn publish_no_implicit() {
           "readme": null,
           "readme_file": null,
           "repository": null,
+          "rust_version": null,
           "vers": "0.1.0"
           }
         "#,
         "foo-0.1.0.crate",
-        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs"],
-        &[(
+        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs", "Cargo.lock"],
+        [(
             "Cargo.toml",
-            &format!(
-                r#"{}
+            str![[r##"
+# THIS FILE IS AUTOMATICALLY GENERATED BY CARGO
+#
+# When uploading crates to the registry Cargo will automatically
+# "normalize" Cargo.toml files for maximal compatibility
+# with all versions of Cargo and also rewrite `path` dependencies
+# to registry (e.g., crates.io) dependencies.
+#
+# If you are reading this file be aware that the original Cargo.toml
+# will likely look very different (and much more reasonable).
+# See Cargo.toml.orig for the original contents.
+
 [package]
+edition = "2015"
 name = "foo"
 version = "0.1.0"
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "foo"
 homepage = "https://example.com/"
+readme = false
 license = "MIT"
+
+[features]
+feat = ["opt-dep1"]
+
+[lib]
+name = "foo"
+path = "src/lib.rs"
+
 [dependencies.opt-dep1]
 version = "1.0"
 optional = true
@@ -1079,17 +1045,15 @@ optional = true
 version = "1.0"
 optional = true
 
-[features]
-feat = ["opt-dep1"]
-"#,
-                cargo::core::package::MANIFEST_PREAMBLE
-            ),
+"##]],
         )],
     );
 }
 
 #[cargo_test]
 fn publish() {
+    let registry = RegistryBuilder::new().http_api().http_index().build();
+
     // Publish behavior with explicit dep: syntax.
     Package::new("bar", "1.0.0").publish();
     let p = project()
@@ -1099,6 +1063,7 @@ fn publish() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 description = "foo"
                 license = "MIT"
                 homepage = "https://example.com/"
@@ -1115,18 +1080,23 @@ fn publish() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("publish --token sekrit -Z namespaced-features")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[UPDATING] [..]
-[PACKAGING] foo v0.1.0 [..]
-[VERIFYING] foo v0.1.0 [..]
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
-[UPLOADING] foo v0.1.0 [..]
-",
-        )
+    p.cargo("publish")
+        .replace_crates_io(registry.index_url())
+        .with_stderr_data(str![[r#"
+[UPDATING] crates.io index
+[PACKAGING] foo v0.1.0 ([ROOT]/foo)
+[UPDATING] crates.io index
+[PACKAGED] 4 files, [FILE_SIZE]B ([FILE_SIZE]B compressed)
+[VERIFYING] foo v0.1.0 ([ROOT]/foo)
+[COMPILING] foo v0.1.0 ([ROOT]/foo/target/package/foo-0.1.0)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[UPLOADING] foo v0.1.0 ([ROOT]/foo)
+[UPLOADED] foo v0.1.0 to registry `crates-io`
+[NOTE] waiting for foo v0.1.0 to be available at registry `crates-io`
+[HELP] you may press ctrl-c to skip waiting; the crate should be available shortly
+[PUBLISHED] foo v0.1.0 at registry `crates-io`
+
+"#]])
         .run();
 
     publish::validate_upload_with_contents(
@@ -1142,7 +1112,6 @@ fn publish() {
               "kind": "normal",
               "name": "bar",
               "optional": true,
-              "registry": "https://github.com/rust-lang/crates.io-index",
               "target": null,
               "version_req": "^1.0"
             }
@@ -1163,32 +1132,260 @@ fn publish() {
           "readme": null,
           "readme_file": null,
           "repository": null,
+          "rust_version": null,
           "vers": "0.1.0"
           }
         "#,
         "foo-0.1.0.crate",
-        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs"],
-        &[(
+        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs", "Cargo.lock"],
+        [(
             "Cargo.toml",
-            &format!(
-                r#"{}
+            str![[r##"
+# THIS FILE IS AUTOMATICALLY GENERATED BY CARGO
+#
+# When uploading crates to the registry Cargo will automatically
+# "normalize" Cargo.toml files for maximal compatibility
+# with all versions of Cargo and also rewrite `path` dependencies
+# to registry (e.g., crates.io) dependencies.
+#
+# If you are reading this file be aware that the original Cargo.toml
+# will likely look very different (and much more reasonable).
+# See Cargo.toml.orig for the original contents.
+
 [package]
+edition = "2015"
 name = "foo"
 version = "0.1.0"
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "foo"
 homepage = "https://example.com/"
+readme = false
 license = "MIT"
-[dependencies.bar]
-version = "1.0"
-optional = true
 
 [features]
 feat1 = []
 feat2 = ["dep:bar"]
 feat3 = ["feat2"]
-"#,
-                cargo::core::package::MANIFEST_PREAMBLE
-            ),
+
+[lib]
+name = "foo"
+path = "src/lib.rs"
+
+[dependencies.bar]
+version = "1.0"
+optional = true
+
+"##]],
         )],
     );
+}
+
+#[cargo_test]
+fn namespaced_feature_together() {
+    // Check for an error when `dep:` is used with `/`
+    Package::new("bar", "1.0.0")
+        .feature("bar-feat", &[])
+        .publish();
+
+    // Non-optional shouldn't have extra err.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+
+                [dependencies]
+                bar = "1.0"
+
+                [features]
+                f1 = ["dep:bar/bar-feat"]
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `f1` includes `dep:bar/bar-feat` with both `dep:` and `/`
+  To fix this, remove the `dep:` prefix.
+
+"#]])
+        .run();
+
+    // Weak dependency shouldn't have extra err.
+    p.change_file(
+        "Cargo.toml",
+        r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [dependencies]
+            bar = {version = "1.0", optional = true }
+
+            [features]
+            f1 = ["dep:bar?/bar-feat"]
+        "#,
+    );
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `f1` includes `dep:bar?/bar-feat` with both `dep:` and `/`
+  To fix this, remove the `dep:` prefix.
+
+"#]])
+        .run();
+
+    // If dep: is already specified, shouldn't have extra err.
+    p.change_file(
+        "Cargo.toml",
+        r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [dependencies]
+            bar = {version = "1.0", optional = true }
+
+            [features]
+            f1 = ["dep:bar", "dep:bar/bar-feat"]
+        "#,
+    );
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `f1` includes `dep:bar/bar-feat` with both `dep:` and `/`
+  To fix this, remove the `dep:` prefix.
+
+"#]])
+        .run();
+
+    // Only when the other 3 cases aren't true should it give some extra help.
+    p.change_file(
+        "Cargo.toml",
+        r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [dependencies]
+            bar = {version = "1.0", optional = true }
+
+            [features]
+            f1 = ["dep:bar/bar-feat"]
+        "#,
+    );
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+
+Caused by:
+  feature `f1` includes `dep:bar/bar-feat` with both `dep:` and `/`
+  To fix this, remove the `dep:` prefix.
+  If the intent is to avoid creating an implicit feature `bar` for an optional dependency, then consider replacing this with two values:
+      "dep:bar", "bar/bar-feat"
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn dep_feature_when_hidden() {
+    // Checks for behavior with dep:bar and bar/feat syntax when there is no
+    // `bar` feature.
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+
+                [dependencies]
+                bar = { path = "bar", optional = true }
+
+                [features]
+                f1 = ["dep:bar"]
+                f2 = ["bar/bar_feat"]
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file(
+            "bar/Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                version = "0.1.0"
+                edition = "2015"
+
+                [features]
+                bar_feat = []
+            "#,
+        )
+        .file("bar/src/lib.rs", "")
+        .build();
+
+    p.cargo("tree -f")
+        .arg("{p} features={f}")
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo) features=
+
+"#]])
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+
+"#]])
+        .run();
+
+    p.cargo("tree -F f1 -f")
+        .arg("{p} features={f}")
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo) features=f1
+└── bar v0.1.0 ([ROOT]/foo/bar) features=
+
+"#]])
+        .with_stderr_data("")
+        .run();
+
+    p.cargo("tree -F f2 -f")
+        .arg("{p} features={f}")
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo) features=f2
+└── bar v0.1.0 ([ROOT]/foo/bar) features=bar_feat
+
+"#]])
+        .with_stderr_data("")
+        .run();
+
+    p.cargo("tree --all-features -f")
+        .arg("{p} features={f}")
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo) features=f1,f2
+└── bar v0.1.0 ([ROOT]/foo/bar) features=bar_feat
+
+"#]])
+        .with_stderr_data("")
+        .run();
 }

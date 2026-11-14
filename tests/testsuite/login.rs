@@ -1,26 +1,25 @@
 //! Tests for the `cargo login` command.
 
-use cargo::core::Shell;
-use cargo::util::config::Config;
-use cargo_test_support::install::cargo_home;
-use cargo_test_support::registry::{self, registry_url};
-use cargo_test_support::{cargo_process, paths, t};
-use std::fs::{self, OpenOptions};
-use std::io::prelude::*;
+use std::fs;
 use std::path::PathBuf;
+
+use crate::prelude::*;
+use crate::utils::cargo_process;
+use cargo_test_support::paths;
+use cargo_test_support::registry::{self, RegistryBuilder};
+use cargo_test_support::str;
+use cargo_test_support::t;
 
 const TOKEN: &str = "test-token";
 const TOKEN2: &str = "test-token2";
 const ORIGINAL_TOKEN: &str = "api-token";
 
-fn setup_new_credentials() {
-    let config = cargo_home().join("credentials");
-    setup_new_credentials_at(config);
+fn credentials_toml() -> PathBuf {
+    paths::home().join(".cargo/credentials.toml")
 }
 
-fn setup_new_credentials_toml() {
-    let config = cargo_home().join("credentials.toml");
-    setup_new_credentials_at(config);
+fn setup_new_credentials() {
+    setup_new_credentials_at(credentials_toml());
 }
 
 fn setup_new_credentials_at(config: PathBuf) {
@@ -31,17 +30,18 @@ fn setup_new_credentials_at(config: PathBuf) {
     ));
 }
 
-fn check_token(expected_token: &str, registry: Option<&str>) -> bool {
-    let credentials = cargo_home().join("credentials");
+/// Asserts whether or not the token is set to the given value for the given registry.
+pub fn check_token(expected_token: Option<&str>, registry: Option<&str>) {
+    let credentials = credentials_toml();
     assert!(credentials.is_file());
 
     let contents = fs::read_to_string(&credentials).unwrap();
-    let toml: toml::Value = contents.parse().unwrap();
+    let toml: toml::Table = contents.parse().unwrap();
 
-    let token = match (registry, toml) {
+    let actual_token = match registry {
         // A registry has been provided, so check that the token exists in a
         // table for the registry.
-        (Some(registry), toml::Value::Table(table)) => table
+        Some(registry) => toml
             .get("registries")
             .and_then(|registries_table| registries_table.get(registry))
             .and_then(|registry_table| match registry_table.get("token") {
@@ -49,144 +49,249 @@ fn check_token(expected_token: &str, registry: Option<&str>) -> bool {
                 _ => None,
             }),
         // There is no registry provided, so check the global token instead.
-        (None, toml::Value::Table(table)) => table
+        None => toml
             .get("registry")
             .and_then(|registry_table| registry_table.get("token"))
             .and_then(|v| match v {
-                toml::Value::String(ref token) => Some(token.as_str().to_string()),
+                toml::Value::String(token) => Some(token.as_str().to_string()),
                 _ => None,
             }),
-        _ => None,
     };
 
-    if let Some(token_val) = token {
-        token_val == expected_token
-    } else {
-        false
+    match (actual_token, expected_token) {
+        (None, None) => {}
+        (Some(actual), Some(expected)) => assert_eq!(actual, expected),
+        (None, Some(expected)) => {
+            panic!("expected `{registry:?}` to be `{expected}`, but was not set")
+        }
+        (Some(actual), None) => {
+            panic!("expected `{registry:?}` to be unset, but was set to `{actual}`")
+        }
     }
 }
 
 #[cargo_test]
-fn login_with_old_credentials() {
-    registry::init();
-
-    cargo_process("login --host")
-        .arg(registry_url().to_string())
-        .arg(TOKEN)
-        .run();
-
-    // Ensure that we get the new token for the registry
-    assert!(check_token(TOKEN, None));
-}
-
-#[cargo_test]
-fn login_with_new_credentials() {
-    registry::init();
-    setup_new_credentials();
-
-    cargo_process("login --host")
-        .arg(registry_url().to_string())
-        .arg(TOKEN)
-        .run();
-
-    // Ensure that we get the new token for the registry
-    assert!(check_token(TOKEN, None));
-}
-
-#[cargo_test]
-fn credentials_work_with_extension() {
-    registry::init();
-    setup_new_credentials_toml();
-
-    cargo_process("login --host")
-        .arg(registry_url().to_string())
-        .arg(TOKEN)
-        .run();
-
-    // Ensure that we get the new token for the registry
-    assert!(check_token(TOKEN, None));
-}
-
-#[cargo_test]
-fn login_with_old_and_new_credentials() {
-    setup_new_credentials();
-    login_with_old_credentials();
-}
-
-#[cargo_test]
-fn login_without_credentials() {
-    registry::init();
-    cargo_process("login --host")
-        .arg(registry_url().to_string())
-        .arg(TOKEN)
-        .run();
-
-    // Ensure that we get the new token for the registry
-    assert!(check_token(TOKEN, None));
-}
-
-#[cargo_test]
-fn new_credentials_is_used_instead_old() {
-    registry::init();
-    setup_new_credentials();
-
-    cargo_process("login --host")
-        .arg(registry_url().to_string())
-        .arg(TOKEN)
-        .run();
-
-    let mut config = Config::new(Shell::new(), cargo_home(), cargo_home());
-    let _ = config.values();
-    let _ = config.load_credentials();
-
-    let token = config.get_string("registry.token").unwrap().map(|p| p.val);
-    assert_eq!(token.unwrap(), TOKEN);
-}
-
-#[cargo_test]
 fn registry_credentials() {
-    registry::alt_init();
+    let _alternative = RegistryBuilder::new().alternative().build();
+    let _alternative2 = RegistryBuilder::new()
+        .alternative_named("alternative2")
+        .build();
 
-    let config = paths::home().join(".cargo/config");
-    let mut f = OpenOptions::new().append(true).open(config).unwrap();
-    t!(f.write_all(
-        format!(
-            r#"
-                [registries.alternative2]
-                index = '{}'
-            "#,
-            registry::generate_url("alternative2-registry")
-        )
-        .as_bytes(),
-    ));
-
-    registry::init_registry(
-        registry::generate_path("alternative2-registry"),
-        registry::generate_alt_dl_url("alt2_dl"),
-        registry::generate_url("alt2_api"),
-        registry::generate_path("alt2_api"),
-    );
     setup_new_credentials();
 
     let reg = "alternative";
 
-    cargo_process("login --registry").arg(reg).arg(TOKEN).run();
+    cargo_process("login --registry")
+        .arg(reg)
+        .with_stdin(TOKEN)
+        .run();
 
     // Ensure that we have not updated the default token
-    assert!(check_token(ORIGINAL_TOKEN, None));
+    check_token(Some(ORIGINAL_TOKEN), None);
 
     // Also ensure that we get the new token for the registry
-    assert!(check_token(TOKEN, Some(reg)));
+    check_token(Some(TOKEN), Some(reg));
 
     let reg2 = "alternative2";
     cargo_process("login --registry")
         .arg(reg2)
-        .arg(TOKEN2)
+        .with_stdin(TOKEN2)
         .run();
 
     // Ensure not overwriting 1st alternate registry token with
     // 2nd alternate registry token (see rust-lang/cargo#7701).
-    assert!(check_token(ORIGINAL_TOKEN, None));
-    assert!(check_token(TOKEN, Some(reg)));
-    assert!(check_token(TOKEN2, Some(reg2)));
+    check_token(Some(ORIGINAL_TOKEN), None);
+    check_token(Some(TOKEN), Some(reg));
+    check_token(Some(TOKEN2), Some(reg2));
+}
+
+#[cargo_test]
+fn empty_login_token() {
+    let registry = RegistryBuilder::new()
+        .no_configure_registry()
+        .no_configure_token()
+        .build();
+    setup_new_credentials();
+
+    cargo_process("login")
+        .replace_crates_io(registry.index_url())
+        .with_stdin("\t\n")
+        .with_stderr_data(str![[r#"
+[UPDATING] crates.io index
+please paste the token found on [ROOTURL]/api/me below
+[ERROR] credential provider `cargo:token` failed action `login`
+
+Caused by:
+  please provide a non-empty token
+
+"#]])
+        .with_status(101)
+        .run();
+
+    cargo_process("login")
+        .replace_crates_io(registry.index_url())
+        .with_stdin("")
+        .with_stderr_data(str![[r#"
+please paste the token found on [ROOTURL]/api/me below
+[ERROR] credential provider `cargo:token` failed action `login`
+
+Caused by:
+  please provide a non-empty token
+
+"#]])
+        .with_status(101)
+        .run();
+
+    cargo_process("login")
+        .replace_crates_io(registry.index_url())
+        .arg("")
+        .with_stdin("")
+        .with_stderr_data(str![[r#"
+[WARNING] `cargo login <token>` is deprecated in favor of reading `<token>` from stdin
+[ERROR] credential provider `cargo:token` failed action `login`
+
+Caused by:
+  please provide a non-empty token
+
+"#]])
+        .with_status(101)
+        .run();
+}
+
+#[cargo_test]
+fn invalid_login_token() {
+    let registry = RegistryBuilder::new()
+        .no_configure_registry()
+        .no_configure_token()
+        .build();
+    setup_new_credentials();
+
+    let check = |stdin: &str, stderr: &str, status: i32| {
+        cargo_process("login")
+            .replace_crates_io(registry.index_url())
+            .with_stdin(stdin)
+            .with_stderr_data(stderr)
+            .with_status(status)
+            .run();
+    };
+
+    let invalid = |stdin: &str| {
+        check(
+            stdin,
+            "[ERROR] credential provider `cargo:token` failed action `login`
+
+Caused by:
+  token contains invalid characters.
+  Only printable ISO-8859-1 characters are allowed as it is sent in a HTTPS header.
+",
+            101,
+        )
+    };
+    let valid = |stdin: &str| {
+        check(
+            stdin,
+            "\
+[LOGIN] token for `crates-io` saved
+",
+            0,
+        )
+    };
+
+    // Update config.json so that the rest of the tests don't need to care
+    // whether or not `Updating` is printed.
+    check(
+        "test",
+        "\
+[UPDATING] crates.io index
+[LOGIN] token for `crates-io` saved
+",
+        0,
+    );
+
+    invalid("😄");
+    invalid("\u{0016}");
+    invalid("\u{0000}");
+    invalid("你好");
+    valid("foo\tbar");
+    valid("foo bar");
+    valid(
+        r##"!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~"##,
+    );
+}
+
+#[cargo_test]
+fn login_with_no_cargo_dir() {
+    // Create a config in the root directory because `login` requires the
+    // index to be updated, and we don't want to hit crates.io.
+    let registry = registry::init();
+    fs::rename(paths::home().join(".cargo"), paths::root().join(".cargo")).unwrap();
+    paths::home().rm_rf();
+    cargo_process("login foo -v")
+        .replace_crates_io(registry.index_url())
+        .run();
+    let credentials = fs::read_to_string(credentials_toml()).unwrap();
+    assert_eq!(credentials, "[registry]\ntoken = \"foo\"\n");
+}
+
+#[cargo_test]
+fn login_with_differently_sized_token() {
+    // Verify that the configuration file gets properly truncated.
+    let registry = registry::init();
+    let credentials = credentials_toml();
+    fs::remove_file(&credentials).unwrap();
+    cargo_process("login lmaolmaolmao -v")
+        .replace_crates_io(registry.index_url())
+        .run();
+    cargo_process("login lmao -v")
+        .replace_crates_io(registry.index_url())
+        .run();
+    cargo_process("login lmaolmaolmao -v")
+        .replace_crates_io(registry.index_url())
+        .run();
+    let credentials = fs::read_to_string(&credentials).unwrap();
+    assert_eq!(credentials, "[registry]\ntoken = \"lmaolmaolmao\"\n");
+}
+
+#[cargo_test]
+fn login_with_token_on_stdin() {
+    let registry = registry::init();
+    let credentials = credentials_toml();
+    fs::remove_file(&credentials).unwrap();
+    cargo_process("login lmao -v")
+        .replace_crates_io(registry.index_url())
+        .run();
+    cargo_process("login")
+        .replace_crates_io(registry.index_url())
+        .with_stdin("some token")
+        .run();
+    let credentials = fs::read_to_string(&credentials).unwrap();
+    assert_eq!(credentials, "[registry]\ntoken = \"some token\"\n");
+}
+
+#[cargo_test]
+fn default_registry_configured() {
+    // When registry.default is set, login should use that one when
+    // --registry is not used.
+    let _alternative = RegistryBuilder::new().alternative().build();
+    let cargo_home = paths::home().join(".cargo");
+    cargo_util::paths::append(
+        &cargo_home.join("config.toml"),
+        br#"
+            [registry]
+            default = "alternative"
+        "#,
+    )
+    .unwrap();
+
+    cargo_process("login")
+        .with_stdin("a-new-token")
+        .with_stderr_data(str![[r#"
+[UPDATING] `alternative` index
+[LOGIN] token for `alternative` saved
+
+"#]])
+        .run();
+
+    check_token(None, None);
+    check_token(Some("a-new-token"), Some("alternative"));
 }

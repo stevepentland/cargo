@@ -1,9 +1,12 @@
 //! Tests for when multiple artifacts have the same output filename.
-//! See https://github.com/rust-lang/cargo/issues/6313 for more details.
+//! See <https://github.com/rust-lang/cargo/issues/6313> for more details.
 //! Ideally these should never happen, but I don't think we'll ever be able to
 //! prevent all collisions.
 
+use crate::prelude::*;
+use crate::utils::cross_compile::disabled as cross_compile_disabled;
 use cargo_test_support::registry::Package;
+use cargo_test_support::str;
 use cargo_test_support::{basic_manifest, cross_compile, project};
 use std::env;
 
@@ -24,6 +27,7 @@ fn collision_dylib() {
             [package]
             name = "a"
             version = "1.0.0"
+            edition = "2015"
 
             [lib]
             crate-type = ["dylib"]
@@ -36,6 +40,7 @@ fn collision_dylib() {
             [package]
             name = "b"
             version = "1.0.0"
+            edition = "2015"
 
             [lib]
             crate-type = ["dylib"]
@@ -48,13 +53,14 @@ fn collision_dylib() {
     // `j=1` is required because on Windows you'll get an error due to
     // two processes writing to the file at the same time.
     p.cargo("build -j=1")
-        .with_stderr_contains(&format!("\
-[WARNING] output filename collision.
-The lib target `a` in package `b v1.0.0 ([..]/foo/b)` has the same output filename as the lib target `a` in package `a v1.0.0 ([..]/foo/a)`.
-Colliding filename is: [..]/foo/target/debug/deps/{}a{}
-The targets should have unique names.
-Consider changing their names to be unique or compiling them separately.
-This may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>.
+        .with_stderr_data(&format!("\
+...
+[WARNING] output filename collision at [ROOT]/foo/target/debug/{}a{}
+ |
+ = [NOTE] the lib target `a` in package `b v1.0.0 ([ROOT]/foo/b)` has the same output filename as the lib target `a` in package `a v1.0.0 ([ROOT]/foo/a)`
+ = [NOTE] this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+ = [HELP] consider changing their names to be unique or compiling them separately
+...
 ", env::consts::DLL_PREFIX, env::consts::DLL_SUFFIX))
         .run();
 }
@@ -79,23 +85,27 @@ fn collision_example() {
     // `j=1` is required because on Windows you'll get an error due to
     // two processes writing to the file at the same time.
     p.cargo("build --examples -j=1")
-        .with_stderr_contains("\
-[WARNING] output filename collision.
-The example target `ex1` in package `b v1.0.0 ([..]/foo/b)` has the same output filename as the example target `ex1` in package `a v1.0.0 ([..]/foo/a)`.
-Colliding filename is: [..]/foo/target/debug/examples/ex1[EXE]
-The targets should have unique names.
-Consider changing their names to be unique or compiling them separately.
-This may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>.
-")
+        .with_stderr_data(str![[r#"
+...
+[WARNING] output filename collision at [ROOT]/foo/target/debug/examples/ex1[EXE]
+ |
+ = [NOTE] the example target `ex1` in package `b v1.0.0 ([ROOT]/foo/b)` has the same output filename as the example target `ex1` in package `a v1.0.0 ([ROOT]/foo/a)`
+ = [NOTE] this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+ = [HELP] consider changing their names to be unique or compiling them separately
+...
+
+"#]])
         .run();
 }
 
 #[cargo_test]
-// --out-dir and examples are currently broken on MSVC and apple.
 // See https://github.com/rust-lang/cargo/issues/7493
-#[cfg_attr(any(target_env = "msvc", target_vendor = "apple"), ignore)]
+#[cfg_attr(
+    any(target_env = "msvc", target_vendor = "apple"),
+    ignore = "--artifact-dir and examples are currently broken on MSVC and apple"
+)]
 fn collision_export() {
-    // `--out-dir` combines some things which can cause conflicts.
+    // `--artifact-dir` combines some things which can cause conflicts.
     let p = project()
         .file("Cargo.toml", &basic_manifest("foo", "1.0.0"))
         .file("examples/foo.rs", "fn main() {}")
@@ -104,16 +114,18 @@ fn collision_export() {
 
     // -j1 to avoid issues with two processes writing to the same file at the
     // same time.
-    p.cargo("build -j1 --out-dir=out -Z unstable-options --bins --examples")
-        .masquerade_as_nightly_cargo()
-        .with_stderr_contains("\
-[WARNING] `--out-dir` filename collision.
-The example target `foo` in package `foo v1.0.0 ([..]/foo)` has the same output filename as the bin target `foo` in package `foo v1.0.0 ([..]/foo)`.
-Colliding filename is: [..]/foo/out/foo[EXE]
-The exported filenames should be unique.
-Consider changing their names to be unique or compiling them separately.
-This may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>.
-")
+    p.cargo("build -j1 --artifact-dir=out --bins --examples")
+        .arg("-Zunstable-options")
+        .masquerade_as_nightly_cargo(&["artifact-dir"])
+        .with_stderr_data(str![[r#"
+[WARNING] `--artifact-dir` filename collision at [ROOT]/foo/out/foo[EXE]
+ |
+ = [NOTE] the example target `foo` in package `foo v1.0.0 ([ROOT]/foo)` has the same output filename as the bin target `foo` in package `foo v1.0.0 ([ROOT]/foo)`
+ = [NOTE] this may become a hard error in the future; see <https://github.com/rust-lang/cargo/issues/6313>
+ = [HELP] consider changing their names to be unique or compiling them separately
+...
+
+"#]])
         .run();
 }
 
@@ -126,6 +138,7 @@ fn collision_doc() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             foo2 = { path = "foo2" }
@@ -138,6 +151,7 @@ fn collision_doc() {
             [package]
             name = "foo2"
             version = "0.1.0"
+            edition = "2015"
 
             [lib]
             name = "foo"
@@ -147,17 +161,15 @@ fn collision_doc() {
         .build();
 
     p.cargo("doc -j=1")
-        .with_stderr_contains(
-            "\
-[WARNING] output filename collision.
-The lib target `foo` in package `foo2 v0.1.0 ([..]/foo/foo2)` has the same output \
-filename as the lib target `foo` in package `foo v0.1.0 ([..]/foo)`.
-Colliding filename is: [..]/foo/target/doc/foo/index.html
-The targets should have unique names.
-This is a known bug where multiple crates with the same name use
-the same path; see <https://github.com/rust-lang/cargo/issues/6313>.
-",
-        )
+        .with_stderr_data(str![[r#"
+...
+[WARNING] output filename collision at [ROOT]/foo/target/doc/foo/index.html
+ |
+ = [NOTE] the lib target `foo` in package `foo2 v0.1.0 ([ROOT]/foo/foo2)` has the same output filename as the lib target `foo` in package `foo v0.1.0 ([ROOT]/foo)`
+ = [NOTE] this is a known bug where multiple crates with the same name use the same path; see <https://github.com/rust-lang/cargo/issues/6313>
+...
+
+"#]])
         .run();
 }
 
@@ -176,6 +188,7 @@ fn collision_doc_multiple_versions() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = "1.0"
@@ -187,20 +200,25 @@ fn collision_doc_multiple_versions() {
 
     // Should only document bar 2.0, should not document old-dep.
     p.cargo("doc")
-        .with_stderr_unordered(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 3 packages to highest compatible versions
+[ADDING] bar v1.0.0 (available: v2.0.0)
 [DOWNLOADING] crates ...
-[DOWNLOADED] bar v2.0.0 [..]
-[DOWNLOADED] bar v1.0.0 [..]
-[DOWNLOADED] old-dep v1.0.0 [..]
+[DOWNLOADED] bar v2.0.0 (registry `dummy-registry`)
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] old-dep v1.0.0 (registry `dummy-registry`)
 [CHECKING] old-dep v1.0.0
 [CHECKING] bar v2.0.0
 [CHECKING] bar v1.0.0
 [DOCUMENTING] bar v2.0.0
-[FINISHED] [..]
-[DOCUMENTING] foo v0.1.0 [..]
-",
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[DOCUMENTING] foo v0.1.0 ([ROOT]/foo)
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -251,6 +269,7 @@ fn collision_doc_host_target_feature_split() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 resolver = "2"
 
                 [dependencies]
@@ -305,10 +324,11 @@ fn collision_doc_host_target_feature_split() {
         .run();
 
     assert!(p.build_dir().join("doc/common_dep/fn.f.html").exists());
-    assert!(!p
-        .build_dir()
-        .join("doc/common_dep/fn.bdep_func.html")
-        .exists());
+    assert!(
+        !p.build_dir()
+            .join("doc/common_dep/fn.bdep_func.html")
+            .exists()
+    );
     assert!(p.build_dir().join("doc/common/fn.f.html").exists());
     assert!(p.build_dir().join("doc/pm/macro.pm.html").exists());
     assert!(p.build_dir().join("doc/foo/fn.f.html").exists());
@@ -325,6 +345,7 @@ fn collision_doc_profile_split() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 pm = { path = "pm" }
@@ -332,6 +353,9 @@ fn collision_doc_profile_split() {
 
                 [profile.dev]
                 opt-level = 2
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -341,46 +365,61 @@ fn collision_doc_profile_split() {
                 [package]
                 name = "pm"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 common = "1.0"
 
                 [lib]
                 proc-macro = true
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("pm/src/lib.rs", "")
         .build();
 
     // Just to verify that common is normally built twice.
+    // This is unordered because in rare cases `pm` may start
+    // building in-between the two `common`.
     p.cargo("build -v")
-        .with_stderr(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[RUNNING] `git [..] fetch [..]`
+From [ROOTURL]/registry
+ * [new ref]         HEAD       -> origin/HEAD
+[LOCKING] 2 packages to highest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] common v1.0.0 [..]
+[DOWNLOADED] common v1.0.0 (registry `dummy-registry`)
 [COMPILING] common v1.0.0
 [RUNNING] `rustc --crate-name common [..]
 [RUNNING] `rustc --crate-name common [..]
-[COMPILING] pm v0.1.0 [..]
+[COMPILING] pm v0.1.0 ([ROOT]/foo/pm)
 [RUNNING] `rustc --crate-name pm [..]
-[COMPILING] foo v0.1.0 [..]
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name foo [..]
-[FINISHED] [..]
-",
+[FINISHED] `dev` profile [optimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 
     // Should only document common once, no warnings.
     p.cargo("doc")
-        .with_stderr_unordered(
-            "\
+        .with_stderr_data(
+            str![[r#"
 [CHECKING] common v1.0.0
 [DOCUMENTING] common v1.0.0
-[DOCUMENTING] pm v0.1.0 [..]
-[DOCUMENTING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
+[DOCUMENTING] pm v0.1.0 ([ROOT]/foo/pm)
+[DOCUMENTING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [optimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -396,6 +435,7 @@ fn collision_doc_sources() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar = "1.0"
@@ -408,25 +448,26 @@ fn collision_doc_sources() {
         .build();
 
     p.cargo("doc -j=1")
-        .with_stderr_unordered(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 2 packages to highest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] bar v1.0.0 [..]
-[WARNING] output filename collision.
-The lib target `bar` in package `bar v1.0.0` has the same output filename as \
-the lib target `bar` in package `bar v1.0.0 ([..]/foo/bar)`.
-Colliding filename is: [..]/foo/target/doc/bar/index.html
-The targets should have unique names.
-This is a known bug where multiple crates with the same name use
-the same path; see <https://github.com/rust-lang/cargo/issues/6313>.
-[CHECKING] bar v1.0.0 [..]
-[DOCUMENTING] bar v1.0.0 [..]
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
+[WARNING] output filename collision at [ROOT]/foo/target/doc/bar/index.html
+ |
+ = [NOTE] the lib target `bar` in package `bar v1.0.0` has the same output filename as the lib target `bar` in package `bar v1.0.0 ([ROOT]/foo/bar)`
+ = [NOTE] this is a known bug where multiple crates with the same name use the same path; see <https://github.com/rust-lang/cargo/issues/6313>
+[CHECKING] bar v1.0.0 ([ROOT]/foo/bar)
+[DOCUMENTING] bar v1.0.0 ([ROOT]/foo/bar)
 [DOCUMENTING] bar v1.0.0
 [CHECKING] bar v1.0.0
-[DOCUMENTING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
+[DOCUMENTING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -434,7 +475,7 @@ the same path; see <https://github.com/rust-lang/cargo/issues/6313>.
 #[cargo_test]
 fn collision_doc_target() {
     // collision in doc with --target, doesn't fail due to orphans
-    if cross_compile::disabled() {
+    if cross_compile_disabled() {
         return;
     }
 
@@ -450,6 +491,7 @@ fn collision_doc_target() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 bar2 = { version = "2.0", package="bar" }
@@ -461,20 +503,25 @@ fn collision_doc_target() {
 
     p.cargo("doc --target")
         .arg(cross_compile::alternate())
-        .with_stderr_unordered(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 3 packages to highest compatible versions
+[ADDING] bar v1.0.0 (available: v2.0.0)
 [DOWNLOADING] crates ...
-[DOWNLOADED] orphaned v1.0.0 [..]
-[DOWNLOADED] bar v2.0.0 [..]
-[DOWNLOADED] bar v1.0.0 [..]
+[DOWNLOADED] orphaned v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] bar v2.0.0 (registry `dummy-registry`)
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
 [CHECKING] orphaned v1.0.0
 [DOCUMENTING] bar v2.0.0
 [CHECKING] bar v2.0.0
 [CHECKING] bar v1.0.0
-[DOCUMENTING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
+[DOCUMENTING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/[ALT_TARGET]/doc/foo/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -501,6 +548,7 @@ fn collision_with_root() {
                 [package]
                 name = "abc"
                 version = "1.0.0"
+                edition = "2015"
 
                 [dependencies]
                 foo-macro = "1.0"
@@ -513,6 +561,7 @@ fn collision_with_root() {
                 [package]
                 name = "foo-macro"
                 version = "1.0.0"
+                edition = "2015"
 
                 [lib]
                 proc-macro = true
@@ -525,22 +574,23 @@ fn collision_with_root() {
         .build();
 
     p.cargo("doc -j=1")
-        .with_stderr_unordered("\
-[UPDATING] [..]
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to highest compatible version
 [DOWNLOADING] crates ...
-[DOWNLOADED] foo-macro v1.0.0 [..]
-warning: output filename collision.
-The lib target `foo-macro` in package `foo-macro v1.0.0` has the same output filename as the lib target `foo-macro` in package `foo-macro v1.0.0 [..]`.
-Colliding filename is: [CWD]/target/doc/foo_macro/index.html
-The targets should have unique names.
-This is a known bug where multiple crates with the same name use
-the same path; see <https://github.com/rust-lang/cargo/issues/6313>.
+[DOWNLOADED] foo-macro v1.0.0 (registry `dummy-registry`)
+[WARNING] output filename collision at [ROOT]/foo/target/doc/foo_macro/index.html
+ |
+ = [NOTE] the lib target `foo_macro` in package `foo-macro v1.0.0` has the same output filename as the lib target `foo_macro` in package `foo-macro v1.0.0 ([ROOT]/foo/foo-macro)`
+ = [NOTE] this is a known bug where multiple crates with the same name use the same path; see <https://github.com/rust-lang/cargo/issues/6313>
 [CHECKING] foo-macro v1.0.0
 [DOCUMENTING] foo-macro v1.0.0
-[CHECKING] abc v1.0.0 [..]
-[DOCUMENTING] foo-macro v1.0.0 [..]
-[DOCUMENTING] abc v1.0.0 [..]
-[FINISHED] [..]
-")
+[CHECKING] abc v1.0.0 ([ROOT]/foo/abc)
+[DOCUMENTING] foo-macro v1.0.0 ([ROOT]/foo/foo-macro)
+[DOCUMENTING] abc v1.0.0 ([ROOT]/foo/abc)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/abc/index.html and 1 other file
+
+"#]].unordered())
         .run();
 }

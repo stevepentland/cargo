@@ -2,33 +2,66 @@
 
 Cargo downloads your Rust project’s dependencies and compiles your project.
 
-Learn more at https://doc.rust-lang.org/cargo/
+**To start using Cargo**, learn more at [The Cargo Book].
 
-## Code Status
+**To start developing Cargo itself**, read the [Cargo Contributor Guide].
 
-[![Build Status](https://dev.azure.com/rust-lang/cargo/_apis/build/status/rust-lang.cargo?branchName=auto-cargo)](https://dev.azure.com/rust-lang/cargo/_build?definitionId=18)
+[The Cargo Book]: https://doc.rust-lang.org/cargo/
+[Cargo Contributor Guide]: https://rust-lang.github.io/cargo/contrib/
 
-Code documentation: https://docs.rs/cargo/
+> The Cargo binary distributed through with Rust is maintained by the Cargo
+> team for use by the wider ecosystem.
+> For all other uses of this crate (as a binary or library) this is maintained
+> by the Cargo team, primarily for use by Cargo and not intended for external
+> use (except as a transitive dependency). This crate may make major changes to
+> its APIs.
 
-## Installing Cargo
-
-Cargo is distributed by default with Rust, so if you've got `rustc` installed
-locally you probably also have `cargo` installed locally.
 
 ## Compiling from Source
 
+### Requirements
+
 Cargo requires the following tools and packages to build:
 
-* `git`
-* `curl` (on Unix)
-* `pkg-config` (on Unix, used to figure out the `libssl` headers/libraries)
-* OpenSSL headers (only for Unix, this is the `libssl-dev` package on ubuntu)
 * `cargo` and `rustc`
+* A C compiler [for your platform](https://github.com/rust-lang/cc-rs#compile-time-requirements)
+* `git` (to clone this repository)
+
+**Other requirements:**
+
+The following are optional based on your platform and needs.
+
+* `pkg-config` — This is used to help locate system packages, such as `libssl` headers/libraries. This may not be required in all cases, such as using vendored OpenSSL, or on Windows.
+* OpenSSL — Only needed on Unix-like systems and only if the `vendored-openssl` Cargo feature is not used.
+
+  This requires the development headers, which can be obtained from the `libssl-dev` package on Ubuntu or `openssl-devel` with apk or yum or the `openssl` package from Homebrew on macOS.
+
+  If using the `vendored-openssl` Cargo feature, then a static copy of OpenSSL will be built from source instead of using the system OpenSSL.
+  This may require additional tools such as `perl` and `make`.
+
+  On macOS, common installation directories from Homebrew, MacPorts, or pkgsrc will be checked. Otherwise it will fall back to `pkg-config`.
+
+  On Windows, the system-provided Schannel will be used instead.
+
+  LibreSSL is also supported.
+
+**Optional system libraries:**
+
+The build will automatically use vendored versions of the following libraries. However, if they are provided by the system and can be found with `pkg-config`, then the system libraries will be used instead:
+
+* [`libcurl`](https://curl.se/libcurl/) — Used for network transfers.
+* [`libgit2`](https://libgit2.org/) — Used for fetching git dependencies.
+* [`libssh2`](https://www.libssh2.org/) — Used for SSH access to git repositories.
+* [`libz`](https://zlib.net/) (AKA zlib) — Used by the above C libraries for data compression. (Rust code uses [`zlib-rs`](https://github.com/trifectatechfoundation/zlib-rs) instead.)
+
+It is recommended to use the vendored versions as they are the versions that are tested to work with Cargo.
+
+### Compiling
 
 First, you'll want to check out this repository
 
 ```
-git clone https://github.com/rust-lang/cargo
+git clone https://github.com/rust-lang/cargo.git
 cd cargo
 ```
 
@@ -51,10 +84,10 @@ a list of known community-developed subcommands.
 
 Cargo releases coincide with Rust releases.
 High level release notes are available as part of [Rust's release notes][rel].
-Detailed release notes are available in this repo at [CHANGELOG.md].
+Detailed release notes are available in the [changelog].
 
 [rel]: https://github.com/rust-lang/rust/blob/master/RELEASES.md
-[CHANGELOG.md]: CHANGELOG.md
+[changelog]: https://doc.rust-lang.org/nightly/cargo/CHANGELOG.html
 
 ## Reporting issues
 
@@ -69,7 +102,7 @@ Please report all issues on the GitHub [issue tracker][issues].
 See the **[Cargo Contributor Guide]** for a complete introduction
 to contributing to Cargo.
 
-[Cargo Contributor Guide]: https://rust-lang.github.io/cargo/contrib/
+Code documentation: <https://doc.rust-lang.org/nightly/nightly-rustc/cargo/>
 
 ## License
 

@@ -1,7 +1,7 @@
 ///! General utilities.
 use crate::EventIter;
-use anyhow::{bail, format_err, Context, Error};
-use pulldown_cmark::{CowStr, Event, Tag};
+use anyhow::{Context, Error, bail, format_err};
+use pulldown_cmark::{CowStr, Event, TagEnd};
 
 /// Splits the text `foo(1)` into "foo" and `1`.
 pub fn parse_name_and_section(text: &str) -> Result<(&str, u8), Error> {
@@ -24,14 +24,14 @@ pub fn parse_name_and_section(text: &str) -> Result<(&str, u8), Error> {
     Ok((name, section))
 }
 
-/// Extracts the text from a header after Tag::Heading has been received.
+/// Extracts the text from a header after `Tag::Heading` has been received.
 pub fn header_text<'e>(parser: &mut EventIter<'e>) -> Result<CowStr<'e>, Error> {
     let text = match parser.next() {
         Some((Event::Text(t), _range)) => t,
         e => bail!("expected plain text in man header, got {:?}", e),
     };
     match parser.next() {
-        Some((Event::End(Tag::Heading(_)), _range)) => {
+        Some((Event::End(TagEnd::Heading(..)), _range)) => {
             return Ok(text);
         }
         e => bail!("expected plain text in man header, got {:?}", e),

@@ -1,10 +1,7 @@
 //! Tests for the `cargo verify-project` command.
 
-use cargo_test_support::{basic_bin_manifest, main_file, project};
-
-fn verify_project_success_output() -> String {
-    r#"{"success":"true"}"#.into()
-}
+use crate::prelude::*;
+use cargo_test_support::{basic_bin_manifest, main_file, project, str};
 
 #[cargo_test]
 fn cargo_verify_project_path_to_cargo_toml_relative() {
@@ -15,7 +12,10 @@ fn cargo_verify_project_path_to_cargo_toml_relative() {
 
     p.cargo("verify-project --manifest-path foo/Cargo.toml")
         .cwd(p.root().parent().unwrap())
-        .with_stdout(verify_project_success_output())
+        .with_stdout_data(str![[r#"
+{"success":"true"}
+
+"#]])
         .run();
 }
 
@@ -29,7 +29,10 @@ fn cargo_verify_project_path_to_cargo_toml_absolute() {
     p.cargo("verify-project --manifest-path")
         .arg(p.root().join("Cargo.toml"))
         .cwd(p.root().parent().unwrap())
-        .with_stdout(verify_project_success_output())
+        .with_stdout_data(str![[r#"
+{"success":"true"}
+
+"#]])
         .run();
 }
 
@@ -41,7 +44,10 @@ fn cargo_verify_project_cwd() {
         .build();
 
     p.cargo("verify-project")
-        .with_stdout(verify_project_success_output())
+        .with_stdout_data(str![[r#"
+{"success":"true"}
+
+"#]])
         .run();
 }
 
@@ -62,12 +68,40 @@ fn cargo_verify_project_honours_unstable_features() {
         .build();
 
     p.cargo("verify-project")
-        .masquerade_as_nightly_cargo()
-        .with_stdout(verify_project_success_output())
+        .masquerade_as_nightly_cargo(&["test-dummy-unstable"])
+        .with_stdout_data(str![[r#"
+{"success":"true"}
+
+"#]])
         .run();
 
     p.cargo("verify-project")
         .with_status(1)
-        .with_json(r#"{"invalid":"failed to parse manifest at `[CWD]/Cargo.toml`"}"#)
+        .with_stdout_data(str![[r#"
+{"invalid":"failed to parse manifest at `[..]`"}
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn verify_project_invalid_toml_syntax() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+[package]
+name = "foo"
+version = "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+
+    p.cargo("verify-project")
+        .with_status(1)
+        .with_stdout_data(str![[r#"
+{"invalid":"TOML parse error at line 4, column 11/n  |/n4 | version = /n  |           ^/nstring values must be quoted, expected literal string/n"}
+
+"#]])
         .run();
 }

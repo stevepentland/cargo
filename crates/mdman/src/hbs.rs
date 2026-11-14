@@ -1,19 +1,20 @@
 //! Handlebars template processing.
 
-use crate::format::Formatter;
+use std::collections::HashMap;
+use std::path::Path;
+
 use anyhow::Error;
 use handlebars::{
-    handlebars_helper, Context, Decorator, Handlebars, Helper, HelperDef, HelperResult, Output,
-    RenderContext, RenderError, Renderable,
+    Context, Decorator, DirectorySourceOptions, Handlebars, Helper, HelperDef, HelperResult,
+    Output, RenderContext, RenderError, RenderErrorReason, Renderable, handlebars_helper,
 };
-use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::path::Path;
+
+use crate::format::Formatter;
 
 type FormatterRef<'a> = &'a (dyn Formatter + Send + Sync);
 
 /// Processes the handlebars template at the given file.
-pub fn expand(file: &Path, formatter: FormatterRef) -> Result<String, Error> {
+pub fn expand(file: &Path, formatter: FormatterRef<'_>) -> Result<String, Error> {
     let mut handlebars = Handlebars::new();
     handlebars.set_strict_mode(true);
     handlebars.register_helper("lower", Box::new(lower));
@@ -23,15 +24,16 @@ pub fn expand(file: &Path, formatter: FormatterRef) -> Result<String, Error> {
     handlebars.register_decorator("set", Box::new(set_decorator));
     handlebars.register_template_file("template", file)?;
     let includes = file.parent().unwrap().join("includes");
-    handlebars.register_templates_directory(".md", includes)?;
-    let mut data: HashMap<String, String> = HashMap::new();
+    let mut options = DirectorySourceOptions::default();
+    options.tpl_extension = ".md".to_string();
+    handlebars.register_templates_directory(includes, options)?;
     let man_name = file
         .file_stem()
         .expect("expected filename")
         .to_str()
         .expect("utf8 filename")
         .to_string();
-    data.insert("man_name".to_string(), man_name);
+    let data = HashMap::from([("man_name", man_name)]);
     let expanded = handlebars.render("template", &data)?;
     Ok(expanded)
 }
@@ -44,14 +46,16 @@ struct OptionsHelper<'a> {
 impl HelperDef for OptionsHelper<'_> {
     fn call<'reg: 'rc, 'rc>(
         &self,
-        h: &Helper<'reg, 'rc>,
+        h: &Helper<'rc>,
         r: &'reg Handlebars<'reg>,
         ctx: &'rc Context,
         rc: &mut RenderContext<'reg, 'rc>,
         out: &mut dyn Output,
     ) -> HelperResult {
         if in_options(rc) {
-            return Err(RenderError::new("options blocks cannot be nested"));
+            return Err(
+                RenderErrorReason::Other("options blocks cannot be nested".to_string()).into(),
+            );
         }
         // Prevent nested {{#options}}.
         set_in_context(rc, "__MDMAN_IN_OPTIONS", serde_json::Value::Bool(true));
@@ -59,7 +63,12 @@ impl HelperDef for OptionsHelper<'_> {
         out.write(&s)?;
         let t = match h.template() {
             Some(t) => t,
-            None => return Err(RenderError::new("options block must not be empty")),
+            None => {
+                return Err(RenderErrorReason::Other(
+                    "options block must not be empty".to_string(),
+                )
+                .into());
+            }
         };
         let block = t.renders(r, ctx, rc)?;
         out.write(&block)?;
@@ -85,20 +94,23 @@ struct OptionHelper<'a> {
 impl HelperDef for OptionHelper<'_> {
     fn call<'reg: 'rc, 'rc>(
         &self,
-        h: &Helper<'reg, 'rc>,
+        h: &Helper<'rc>,
         r: &'reg Handlebars<'reg>,
-        ctx: &'rc Context,
+        gctx: &'rc Context,
         rc: &mut RenderContext<'reg, 'rc>,
         out: &mut dyn Output,
     ) -> HelperResult {
         if !in_options(rc) {
-            return Err(RenderError::new("option must be in options block"));
+            return Err(
+                RenderErrorReason::Other("option must be in options block".to_string()).into(),
+            );
         }
         let params = h.params();
         if params.is_empty() {
-            return Err(RenderError::new(
-                "option block must have at least one param",
-            ));
+            return Err(RenderErrorReason::Other(
+                "option block must have at least one param".to_string(),
+            )
+            .into());
         }
         // Convert params to strings.
         let params = params
@@ -107,18 +119,28 @@ impl HelperDef for OptionHelper<'_> {
                 param
                     .value()
                     .as_str()
-                    .ok_or_else(|| RenderError::new("option params must be strings"))
+                    .ok_or_else(|| {
+                        RenderErrorReason::Other("option params must be strings".to_string())
+                    })
+                    .into()
             })
-            .collect::<Result<Vec<&str>, RenderError>>()?;
+            .collect::<Result<Vec<&str>, RenderErrorReason>>()?;
         let t = match h.template() {
             Some(t) => t,
-            None => return Err(RenderError::new("option block must not be empty")),
+            None => {
+                return Err(
+                    RenderErrorReason::Other("option block must not be empty".to_string()).into(),
+                );
+            }
         };
         // Render the block.
-        let block = t.renders(r, ctx, rc)?;
+        let block = t.renders(r, gctx, rc)?;
+
+        // Windows newlines can break some rendering, so normalize.
+        let block = block.replace("\r\n", "\n");
 
         // Get the name of this page.
-        let man_name = ctx
+        let man_name = gctx
             .data()
             .get("man_name")
             .expect("expected man_name in context")
@@ -129,7 +151,7 @@ impl HelperDef for OptionHelper<'_> {
         let option = self
             .formatter
             .render_option(&params, &block, man_name)
-            .map_err(|e| RenderError::new(format!("option render failed: {}", e)))?;
+            .map_err(|e| RenderErrorReason::Other(format!("option render failed: {}", e)))?;
         out.write(&option)?;
         Ok(())
     }
@@ -143,7 +165,7 @@ struct ManLinkHelper<'a> {
 impl HelperDef for ManLinkHelper<'_> {
     fn call<'reg: 'rc, 'rc>(
         &self,
-        h: &Helper<'reg, 'rc>,
+        h: &Helper<'rc>,
         _r: &'reg Handlebars<'reg>,
         _ctx: &'rc Context,
         _rc: &mut RenderContext<'reg, 'rc>,
@@ -151,22 +173,22 @@ impl HelperDef for ManLinkHelper<'_> {
     ) -> HelperResult {
         let params = h.params();
         if params.len() != 2 {
-            return Err(RenderError::new("{{man}} must have two arguments"));
+            return Err(
+                RenderErrorReason::Other("{{man}} must have two arguments".to_string()).into(),
+            );
         }
-        let name = params[0]
-            .value()
-            .as_str()
-            .ok_or_else(|| RenderError::new("man link name must be a string"))?;
-        let section = params[1]
-            .value()
-            .as_u64()
-            .ok_or_else(|| RenderError::new("man link section must be an integer"))?;
-        let section =
-            u8::try_from(section).map_err(|_e| RenderError::new("section number too large"))?;
+        let name = params[0].value().as_str().ok_or_else(|| {
+            RenderErrorReason::Other("man link name must be a string".to_string())
+        })?;
+        let section = params[1].value().as_u64().ok_or_else(|| {
+            RenderErrorReason::Other("man link section must be an integer".to_string())
+        })?;
+        let section = u8::try_from(section)
+            .map_err(|_e| RenderErrorReason::Other("section number too large".to_string()))?;
         let link = self
             .formatter
             .linkify_man_to_md(name, section)
-            .map_err(|e| RenderError::new(format!("failed to linkify man: {}", e)))?;
+            .map_err(|e| RenderErrorReason::Other(format!("failed to linkify man: {}", e)))?;
         out.write(&link)?;
         Ok(())
     }
@@ -176,10 +198,10 @@ impl HelperDef for ManLinkHelper<'_> {
 ///
 /// This sets a variable to a value within the template context.
 fn set_decorator(
-    d: &Decorator,
-    _: &Handlebars,
+    d: &Decorator<'_>,
+    _: &Handlebars<'_>,
     _ctx: &Context,
-    rc: &mut RenderContext,
+    rc: &mut RenderContext<'_, '_>,
 ) -> Result<(), RenderError> {
     let data_to_set = d.hash();
     for (k, v) in data_to_set {
@@ -189,26 +211,26 @@ fn set_decorator(
 }
 
 /// Sets a variable to a value within the context.
-fn set_in_context(rc: &mut RenderContext, key: &str, value: serde_json::Value) {
-    let mut ctx = match rc.context() {
+fn set_in_context(rc: &mut RenderContext<'_, '_>, key: &str, value: serde_json::Value) {
+    let mut gctx = match rc.context() {
         Some(c) => (*c).clone(),
         None => Context::wraps(serde_json::Value::Object(serde_json::Map::new())).unwrap(),
     };
-    if let serde_json::Value::Object(m) = ctx.data_mut() {
+    if let serde_json::Value::Object(m) = gctx.data_mut() {
         m.insert(key.to_string(), value);
-        rc.set_context(ctx);
+        rc.set_context(gctx);
     } else {
         panic!("expected object in context");
     }
 }
 
 /// Removes a variable from the context.
-fn remove_from_context(rc: &mut RenderContext, key: &str) {
-    let ctx = rc.context().expect("cannot remove from null context");
-    let mut ctx = (*ctx).clone();
-    if let serde_json::Value::Object(m) = ctx.data_mut() {
+fn remove_from_context(rc: &mut RenderContext<'_, '_>, key: &str) {
+    let gctx = rc.context().expect("cannot remove from null context");
+    let mut gctx = (*gctx).clone();
+    if let serde_json::Value::Object(m) = gctx.data_mut() {
         m.remove(key);
-        rc.set_context(ctx);
+        rc.set_context(gctx);
     } else {
         panic!("expected object in context");
     }

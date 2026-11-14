@@ -1,6 +1,8 @@
 //! Tests for `paths` overrides.
 
+use crate::prelude::*;
 use cargo_test_support::registry::Package;
+use cargo_test_support::str;
 use cargo_test_support::{basic_manifest, project};
 
 #[cargo_test]
@@ -15,10 +17,14 @@ fn broken_path_override_warns() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 a = { path = "a1" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -28,10 +34,14 @@ fn broken_path_override_warns() {
                 [package]
                 name = "a"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 bar = "0.1"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a1/src/lib.rs", "")
@@ -41,21 +51,25 @@ fn broken_path_override_warns() {
                 [package]
                 name = "a"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 bar = "0.2"
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("a2/src/lib.rs", "")
-        .file(".cargo/config", r#"paths = ["a2"]"#)
+        .file(".cargo/config.toml", r#"paths = ["a2"]"#)
         .build();
 
-    p.cargo("build")
-        .with_stderr(
-            "\
-[UPDATING] [..]
-warning: path override for crate `a` has altered the original list of
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 2 packages to highest compatible versions
+[WARNING] path override for crate `a` has altered the original list of
 dependencies; the dependency on `bar` was either added or
 modified to not match the previously resolved version
 
@@ -71,13 +85,13 @@ documented online at the url below for more information.
 https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html
 
 [DOWNLOADING] crates ...
-[DOWNLOADED] [..]
-[COMPILING] [..]
-[COMPILING] [..]
-[COMPILING] [..]
-[FINISHED] [..]
-",
-        )
+[DOWNLOADED] bar v0.2.0 (registry `dummy-registry`)
+[CHECKING] bar v0.2.0
+[CHECKING] a v0.0.1 ([ROOT]/foo/a2)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -115,10 +129,10 @@ fn override_to_path_dep() {
         .file("bar/src/lib.rs", "")
         .file("bar/baz/Cargo.toml", &basic_manifest("baz", "0.0.1"))
         .file("bar/baz/src/lib.rs", "")
-        .file(".cargo/config", r#"paths = ["bar"]"#)
+        .file(".cargo/config.toml", r#"paths = ["bar"]"#)
         .build();
 
-    p.cargo("build").run();
+    p.cargo("check").run();
 }
 
 #[cargo_test]
@@ -132,10 +146,14 @@ fn paths_ok_with_optional() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 bar = { path = "bar" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -145,10 +163,14 @@ fn paths_ok_with_optional() {
                 [package]
                 name = "bar"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 baz = { version = "0.1", optional = true }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("bar/src/lib.rs", "")
@@ -158,24 +180,28 @@ fn paths_ok_with_optional() {
                 [package]
                 name = "bar"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
                 baz = { version = "0.1", optional = true }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("bar2/src/lib.rs", "")
-        .file(".cargo/config", r#"paths = ["bar2"]"#)
+        .file(".cargo/config.toml", r#"paths = ["bar2"]"#)
         .build();
 
-    p.cargo("build")
-        .with_stderr(
-            "\
-[COMPILING] bar v0.1.0 ([..]bar2)
-[COMPILING] foo v0.0.1 ([..])
-[FINISHED] [..]
-",
-        )
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[CHECKING] bar v0.1.0 ([ROOT]/foo/bar2)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -190,10 +216,14 @@ fn paths_add_optional_bad() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2021"
                 authors = []
 
                 [dependencies]
                 bar = { path = "bar" }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -205,22 +235,98 @@ fn paths_add_optional_bad() {
                 [package]
                 name = "bar"
                 version = "0.1.0"
+                edition = "2021"
                 authors = []
 
                 [dependencies]
                 baz = { version = "0.1", optional = true }
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("bar2/src/lib.rs", "")
-        .file(".cargo/config", r#"paths = ["bar2"]"#)
+        .file(".cargo/config.toml", r#"paths = ["bar2"]"#)
         .build();
 
-    p.cargo("build")
-        .with_stderr_contains(
-            "\
-warning: path override for crate `bar` has altered the original list of
-dependencies; the dependency on `baz` was either added or\
-",
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[WARNING] path override for crate `bar` has altered the original list of
+dependencies; the dependency on `baz` was either added or
+modified to not match the previously resolved version
+
+This is currently allowed but is known to produce buggy behavior with spurious
+recompiles and changes to the crate graph. Path overrides unfortunately were
+never intended to support this feature, so for now this message is just a
+warning. In the future, however, this message will become a hard error.
+
+To change the dependency graph via an override it's recommended to use the
+`[patch]` feature of Cargo instead of the path override feature. This is
+documented online at the url below for more information.
+
+https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html
+
+[CHECKING] bar v0.1.0 ([ROOT]/foo/bar2)
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn env_paths_overrides_not_supported() {
+    Package::new("file", "0.1.0").publish();
+    Package::new("cli", "0.1.0").publish();
+    Package::new("env", "0.1.0").publish();
+
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                edition = "2015"
+
+                [dependencies]
+                file = "0.1.0"
+                cli = "0.1.0"
+                env = "0.1.0"
+
+                [lints.cargo]
+                default = "allow"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .file("file/Cargo.toml", &basic_manifest("file", "0.2.0"))
+        .file("file/src/lib.rs", "")
+        .file("cli/Cargo.toml", &basic_manifest("cli", "0.2.0"))
+        .file("cli/src/lib.rs", "")
+        .file("env/Cargo.toml", &basic_manifest("env", "0.2.0"))
+        .file("env/src/lib.rs", "")
+        .file(".cargo/config.toml", r#"paths = ["file"]"#)
+        .build();
+
+    p.cargo("check")
+        .arg("--config")
+        .arg("paths=['cli']")
+        // paths overrides ignore env
+        .env("CARGO_PATHS", "env")
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 3 packages to highest compatible versions
+[DOWNLOADING] crates ...
+[DOWNLOADED] env v0.1.0 (registry `dummy-registry`)
+[CHECKING] file v0.2.0 ([ROOT]/foo/file)
+[CHECKING] cli v0.2.0 ([ROOT]/foo/cli)
+[CHECKING] env v0.1.0
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }

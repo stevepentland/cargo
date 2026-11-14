@@ -1,246 +1,299 @@
 //! Tests for the `cargo search` command.
 
-use cargo_test_support::cargo_process;
-use cargo_test_support::git::repo;
-use cargo_test_support::paths;
-use cargo_test_support::registry::{api_path, registry_path, registry_url};
-use std::collections::HashSet;
-use std::fs;
-use std::path::Path;
-use url::Url;
+use crate::prelude::*;
+use crate::utils::cargo_process;
+use cargo_test_support::registry::{RegistryBuilder, Response};
+use cargo_test_support::str;
+use std::sync::{Arc, Mutex};
 
-fn api() -> Url {
-    Url::from_file_path(&*api_path()).ok().unwrap()
-}
-
-fn write_crates(dest: &Path) {
-    let content = r#"{
-        "crates": [{
-            "created_at": "2014-11-16T20:17:35Z",
-            "description": "Design by contract style assertions for Rust",
-            "documentation": null,
-            "downloads": 2,
-            "homepage": null,
-            "id": "hoare",
-            "keywords": [],
-            "license": null,
-            "links": {
-                "owners": "/api/v1/crates/hoare/owners",
-                "reverse_dependencies": "/api/v1/crates/hoare/reverse_dependencies",
-                "version_downloads": "/api/v1/crates/hoare/downloads",
-                "versions": "/api/v1/crates/hoare/versions"
-            },
-            "max_version": "0.1.1",
-            "name": "hoare",
-            "repository": "https://github.com/nick29581/libhoare",
-            "updated_at": "2014-11-20T21:49:21Z",
-            "versions": null
+const SEARCH_API_RESPONSE: &[u8] = br#"
+{
+    "crates": [{
+        "created_at": "2014-11-16T20:17:35Z",
+        "description": "Design by contract style assertions for Rust",
+        "documentation": null,
+        "downloads": 2,
+        "homepage": null,
+        "id": "hoare",
+        "keywords": [],
+        "license": null,
+        "links": {
+            "owners": "/api/v1/crates/hoare/owners",
+            "reverse_dependencies": "/api/v1/crates/hoare/reverse_dependencies",
+            "version_downloads": "/api/v1/crates/hoare/downloads",
+            "versions": "/api/v1/crates/hoare/versions"
         },
-        {
-            "id": "postgres",
-            "name": "postgres",
-            "updated_at": "2020-05-01T23:17:54.335921+00:00",
-            "versions": null,
-            "keywords": null,
-            "categories": null,
-            "badges": [
-                {
-                    "badge_type": "circle-ci",
-                    "attributes": {
-                        "repository": "sfackler/rust-postgres",
-                        "branch": null
-                    }
+        "max_version": "0.1.1",
+        "name": "hoare",
+        "repository": "https://github.com/nick29581/libhoare",
+        "updated_at": "2014-11-20T21:49:21Z",
+        "versions": null
+    },
+    {
+        "id": "postgres",
+        "name": "postgres",
+        "updated_at": "2020-05-01T23:17:54.335921+00:00",
+        "versions": null,
+        "keywords": null,
+        "categories": null,
+        "badges": [
+            {
+                "badge_type": "circle-ci",
+                "attributes": {
+                    "repository": "sfackler/rust-postgres",
+                    "branch": null
                 }
-            ],
-            "created_at": "2014-11-24T02:34:44.756689+00:00",
-            "downloads": 535491,
-            "recent_downloads": 88321,
-            "max_version": "0.17.3",
-            "newest_version": "0.17.3",
-            "description": "A native, synchronous PostgreSQL client",
-            "homepage": null,
-            "documentation": null,
-            "repository": "https://github.com/sfackler/rust-postgres",
-            "links": {
-                "version_downloads": "/api/v1/crates/postgres/downloads",
-                "versions": "/api/v1/crates/postgres/versions",
-                "owners": "/api/v1/crates/postgres/owners",
-                "owner_team": "/api/v1/crates/postgres/owner_team",
-                "owner_user": "/api/v1/crates/postgres/owner_user",
-                "reverse_dependencies": "/api/v1/crates/postgres/reverse_dependencies"
-            },
-            "exact_match": true
-        }
+            }
         ],
-        "meta": {
-            "total": 2
-        }
-    }"#;
-
-    // Older versions of curl don't peel off query parameters when looking for
-    // filenames, so just make both files.
-    //
-    // On windows, though, `?` is an invalid character, but we always build curl
-    // from source there anyway!
-    fs::write(&dest, content).unwrap();
-    if !cfg!(windows) {
-        fs::write(
-            &dest.with_file_name("crates?q=postgres&per_page=10"),
-            content,
-        )
-        .unwrap();
+        "created_at": "2014-11-24T02:34:44.756689+00:00",
+        "downloads": 535491,
+        "recent_downloads": 88321,
+        "max_version": "0.17.3",
+        "newest_version": "0.17.3",
+        "description": "A native, synchronous PostgreSQL client",
+        "homepage": null,
+        "documentation": null,
+        "repository": "https://github.com/sfackler/rust-postgres",
+        "links": {
+            "version_downloads": "/api/v1/crates/postgres/downloads",
+            "versions": "/api/v1/crates/postgres/versions",
+            "owners": "/api/v1/crates/postgres/owners",
+            "owner_team": "/api/v1/crates/postgres/owner_team",
+            "owner_user": "/api/v1/crates/postgres/owner_user",
+            "reverse_dependencies": "/api/v1/crates/postgres/reverse_dependencies"
+        },
+        "exact_match": true
     }
-}
+    ],
+    "meta": {
+        "total": 2
+    }
+}"#;
 
 const SEARCH_RESULTS: &str = "\
 hoare = \"0.1.1\"        # Design by contract style assertions for Rust
 postgres = \"0.17.3\"    # A native, synchronous PostgreSQL client
 ";
 
-fn setup() {
-    let cargo_home = paths::root().join(".cargo");
-    fs::create_dir_all(cargo_home).unwrap();
-    fs::create_dir_all(&api_path().join("api/v1")).unwrap();
-
-    // Init a new registry
-    let _ = repo(&registry_path())
-        .file(
-            "config.json",
-            &format!(r#"{{"dl":"{0}","api":"{0}"}}"#, api()),
-        )
-        .build();
-
-    let base = api_path().join("api/v1/crates");
-    write_crates(&base);
-}
-
-fn set_cargo_config() {
-    let config = paths::root().join(".cargo/config");
-
-    fs::write(
-        &config,
-        format!(
-            r#"
-            [source.crates-io]
-            registry = 'https://wut'
-            replace-with = 'dummy-registry'
-
-            [source.dummy-registry]
-            registry = '{reg}'
-            "#,
-            reg = registry_url(),
-        ),
-    )
-    .unwrap();
+#[must_use]
+fn setup() -> RegistryBuilder {
+    RegistryBuilder::new()
+        .http_api()
+        .add_responder("/api/v1/crates", |_, _| Response {
+            code: 200,
+            headers: vec![],
+            body: SEARCH_API_RESPONSE.to_vec(),
+        })
 }
 
 #[cargo_test]
 fn not_update() {
-    setup();
-    set_cargo_config();
-
-    use cargo::core::{Shell, Source, SourceId};
-    use cargo::sources::RegistrySource;
-    use cargo::util::Config;
-
-    let sid = SourceId::for_registry(&registry_url()).unwrap();
-    let cfg = Config::new(
-        Shell::from_write(Box::new(Vec::new())),
-        paths::root(),
-        paths::home().join(".cargo"),
-    );
-    let lock = cfg.acquire_package_cache_lock().unwrap();
-    let mut regsrc = RegistrySource::remote(sid, &HashSet::new(), &cfg);
-    regsrc.update().unwrap();
-    drop(lock);
+    let registry = setup().build();
 
     cargo_process("search postgres")
-        .with_stdout_contains(SEARCH_RESULTS)
-        .with_stderr("") // without "Updating ... index"
+        .replace_crates_io(registry.index_url())
+        .with_stdout_data(SEARCH_RESULTS)
+        .with_stderr_data(str![[r#"
+[UPDATING] crates.io index
+[NOTE] to learn more about a package, run `cargo info <name>`
+
+"#]])
+        .run();
+
+    cargo_process("search postgres")
+        .replace_crates_io(registry.index_url())
+        .with_stdout_data(SEARCH_RESULTS)
+        // without "Updating ... index"
+        .with_stderr_data(str![[r#"
+[NOTE] to learn more about a package, run `cargo info <name>`
+
+"#]])
         .run();
 }
 
 #[cargo_test]
 fn replace_default() {
-    setup();
-    set_cargo_config();
+    let registry = setup().build();
 
     cargo_process("search postgres")
-        .with_stdout_contains(SEARCH_RESULTS)
-        .with_stderr_contains("[..]Updating [..] index")
+        .replace_crates_io(registry.index_url())
+        .with_stdout_data(SEARCH_RESULTS)
+        .with_stderr_data(str![[r#"
+[UPDATING] crates.io index
+[NOTE] to learn more about a package, run `cargo info <name>`
+
+"#]])
         .run();
 }
 
 #[cargo_test]
 fn simple() {
-    setup();
+    let registry = setup().build();
 
     cargo_process("search postgres --index")
-        .arg(registry_url().to_string())
-        .with_stdout_contains(SEARCH_RESULTS)
-        .run();
-}
+        .arg(registry.index_url().as_str())
+        .with_stdout_data(SEARCH_RESULTS)
+        .with_stderr_data(str![[r#"
+[UPDATING] `[ROOT]/registry` index
+[NOTE] to learn more about a package, run `cargo info <name>`
 
-// TODO: Deprecated
-// remove once it has been decided '--host' can be safely removed
-#[cargo_test]
-fn simple_with_host() {
-    setup();
-
-    cargo_process("search postgres --host")
-        .arg(registry_url().to_string())
-        .with_stderr(
-            "\
-[WARNING] The flag '--host' is no longer valid.
-
-Previous versions of Cargo accepted this flag, but it is being
-deprecated. The flag is being renamed to 'index', as the flag
-wants the location of the index. Please use '--index' instead.
-
-This will soon become a hard error, so it's either recommended
-to update to a fixed version or contact the upstream maintainer
-about this warning.
-[UPDATING] `[CWD]/registry` index
-",
-        )
-        .with_stdout_contains(SEARCH_RESULTS)
-        .run();
-}
-
-// TODO: Deprecated
-// remove once it has been decided '--host' can be safely removed
-#[cargo_test]
-fn simple_with_index_and_host() {
-    setup();
-
-    cargo_process("search postgres --index")
-        .arg(registry_url().to_string())
-        .arg("--host")
-        .arg(registry_url().to_string())
-        .with_stderr(
-            "\
-[WARNING] The flag '--host' is no longer valid.
-
-Previous versions of Cargo accepted this flag, but it is being
-deprecated. The flag is being renamed to 'index', as the flag
-wants the location of the index. Please use '--index' instead.
-
-This will soon become a hard error, so it's either recommended
-to update to a fixed version or contact the upstream maintainer
-about this warning.
-[UPDATING] `[CWD]/registry` index
-",
-        )
-        .with_stdout_contains(SEARCH_RESULTS)
+"#]])
         .run();
 }
 
 #[cargo_test]
 fn multiple_query_params() {
-    setup();
+    let registry = setup().build();
 
     cargo_process("search postgres sql --index")
-        .arg(registry_url().to_string())
-        .with_stdout_contains(SEARCH_RESULTS)
+        .arg(registry.index_url().as_str())
+        .with_stdout_data(SEARCH_RESULTS)
+        .with_stderr_data(str![[r#"
+[UPDATING] `[ROOT]/registry` index
+[NOTE] to learn more about a package, run `cargo info <name>`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn ignore_quiet() {
+    let registry = setup().build();
+
+    cargo_process("search -q postgres")
+        .replace_crates_io(registry.index_url())
+        .with_stdout_data(SEARCH_RESULTS)
+        .run();
+}
+
+#[cargo_test]
+fn colored_results() {
+    let registry = setup().build();
+
+    cargo_process("search --color=never postgres")
+        .replace_crates_io(registry.index_url())
+        .with_stdout_does_not_contain("[..]\x1b[[..]")
+        .run();
+
+    cargo_process("search --color=always postgres")
+        .replace_crates_io(registry.index_url())
+        .with_stdout_data(
+            "\
+...
+[..]\x1b[[..]
+...
+",
+        )
+        .run();
+}
+
+#[cargo_test]
+fn auth_required_failure() {
+    let server = setup().auth_required().no_configure_token().build();
+
+    cargo_process("search postgres")
+        .replace_crates_io(server.index_url())
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[UPDATING] crates.io index
+[ERROR] no token found, please run `cargo login`
+or use environment variable CARGO_REGISTRY_TOKEN
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn auth_required() {
+    let server = setup().auth_required().build();
+
+    cargo_process("search postgres")
+        .replace_crates_io(server.index_url())
+        .with_stdout_data(SEARCH_RESULTS)
+        .run();
+}
+
+#[cargo_test]
+fn auth_required_cross_origin_redirect_does_not_forward_auth() {
+    let redirected_auth = Arc::new(Mutex::new(Vec::new()));
+    let redirected_auth_cb = redirected_auth.clone();
+    let target = RegistryBuilder::new()
+        .alternative_named("redirect-target")
+        .no_configure_registry()
+        .no_configure_token()
+        .http_api()
+        .add_responder("/api/v1/crates", move |req, _| {
+            redirected_auth_cb
+                .lock()
+                .unwrap()
+                .push(req.authorization.clone());
+            if req.authorization.is_some() {
+                Response {
+                    code: 403,
+                    headers: vec![],
+                    body: b"unexpected auth on redirected request".to_vec(),
+                }
+            } else {
+                Response {
+                    code: 200,
+                    headers: vec![],
+                    body: SEARCH_API_RESPONSE.to_vec(),
+                }
+            }
+        })
+        .build();
+
+    let initial_auth = Arc::new(Mutex::new(Vec::new()));
+    let initial_auth_cb = initial_auth.clone();
+    let redirect_to = format!("{}api/v1/crates?q=postgres&per_page=10", target.api_url());
+    let server = RegistryBuilder::new()
+        .http_api()
+        .auth_required()
+        .add_responder("/api/v1/crates", move |req, _| {
+            initial_auth_cb
+                .lock()
+                .unwrap()
+                .push(req.authorization.clone());
+            Response {
+                code: 302,
+                headers: vec![format!("Location: {redirect_to}")],
+                body: Vec::new(),
+            }
+        })
+        .build();
+
+    cargo_process("search postgres")
+        .replace_crates_io(server.index_url())
+        .with_stdout_data(SEARCH_RESULTS)
+        .run();
+
+    let initial_auth = initial_auth.lock().unwrap();
+    assert!(initial_auth[0].is_some());
+    assert_eq!(&*redirected_auth.lock().unwrap(), &[None]);
+}
+
+#[cargo_test]
+fn follows_redirect() {
+    let _registry = RegistryBuilder::new()
+        .http_api()
+        .add_responder("/api/v1/crates", |req, _server| {
+            let query = req.url.query().unwrap_or("");
+            let redirect_url = format!("/api/v1/crates/redirected?{}", query);
+            Response {
+                code: 302,
+                headers: vec![format!("Location: {}", redirect_url)],
+                body: vec![],
+            }
+        })
+        .add_responder("/api/v1/crates/redirected", |_, _| Response {
+            code: 200,
+            headers: vec![],
+            body: SEARCH_API_RESPONSE.to_vec(),
+        })
+        .build();
+
+    cargo_process("search postgres")
+        .replace_crates_io(&_registry.index_url())
+        .with_stdout_data(SEARCH_RESULTS)
         .run();
 }

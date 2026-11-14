@@ -1,8 +1,8 @@
 //! Markdown formatter.
 
-use crate::util::unwrap;
 use crate::ManMap;
-use anyhow::{bail, format_err, Error};
+use crate::util::unwrap;
+use anyhow::{Error, bail, format_err};
 use std::fmt::Write;
 
 pub struct MdFormatter {
@@ -30,11 +30,11 @@ impl super::Formatter for MdFormatter {
     }
 
     fn render_options_start(&self) -> &'static str {
-        "<dl>"
+        "<dl>\n"
     }
 
     fn render_options_end(&self) -> &'static str {
-        "</dl>"
+        "</dl>\n"
     }
 
     fn render_option(&self, params: &[&str], block: &str, man_name: &str) -> Result<String, Error> {
@@ -58,17 +58,14 @@ impl super::Formatter for MdFormatter {
             let id = format!("option-{}-{}", man_name, no_tags);
             write!(
                 result,
-                "<dt class=\"option-term\" id=\"{ID}\">\
-                <a class=\"option-anchor\" href=\"#{ID}\"></a>{OPTION}</dt>\n",
-                ID = id,
-                OPTION = no_p
+                "<dt class=\"option-term\" id=\"{id}\">\
+                <a class=\"option-anchor\" href=\"#{id}\">{no_p}</a></dt>\n",
             )?;
         }
         let rendered_block = self.render_html(block)?;
         write!(
             result,
-            "<dd class=\"option-desc\">{}</dd>\n",
-            unwrap_p(&rendered_block)
+            "<dd class=\"option-desc\">{rendered_block}</dd>\n\n",
         )?;
         Ok(result)
     }

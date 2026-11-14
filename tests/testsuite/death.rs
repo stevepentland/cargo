@@ -6,6 +6,7 @@ use std::net::TcpListener;
 use std::process::{Child, Stdio};
 use std::thread;
 
+use crate::prelude::*;
 use cargo_test_support::{project, slow_cpu_multiplier};
 
 #[cargo_test]
@@ -43,7 +44,7 @@ fn ctrl_c_kills_everyone() {
         )
         .build();
 
-    let mut cargo = p.cargo("build").build_command();
+    let mut cargo = p.cargo("check").build_command();
     cargo
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

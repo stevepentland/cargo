@@ -1,8 +1,9 @@
 //! Tests for configuration values that point to programs.
 
-use cargo_test_support::{
-    basic_lib_manifest, no_such_file_err_msg, project, rustc_host, rustc_host_env,
-};
+use crate::prelude::*;
+use crate::utils::cross_compile::disabled as cross_compile_disabled;
+use cargo_test_support::cross_compile::alternate as cross_compile_alternate;
+use cargo_test_support::{Project, basic_lib_manifest, project, rustc_host, rustc_host_env, str};
 
 #[cargo_test]
 fn pathless_tools() {
@@ -12,7 +13,7 @@ fn pathless_tools() {
         .file("Cargo.toml", &basic_lib_manifest("foo"))
         .file("src/lib.rs", "")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             &format!(
                 r#"
                     [target.{}]
@@ -24,13 +25,96 @@ fn pathless_tools() {
         .build();
 
     foo.cargo("build --verbose")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.5.0 ([CWD])
-[RUNNING] `rustc [..] -C linker=nonexistent-linker [..]`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.5.0 ([ROOT]/foo)
+[RUNNING] `rustc [..]-C linker=nonexistent-linker[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+// can set a custom linker via `target.'cfg(..)'.linker`
+#[cargo_test]
+fn custom_linker_cfg() {
+    let foo = project()
+        .file("Cargo.toml", &basic_lib_manifest("foo"))
+        .file("src/lib.rs", "")
+        .file(
+            ".cargo/config.toml",
+            r#"
+            [target.'cfg(not(target_os = "none"))']
+            linker = "nonexistent-linker"
+            "#,
         )
+        .build();
+
+    foo.cargo("build --verbose")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.5.0 ([ROOT]/foo)
+[RUNNING] `rustc [..]-C linker=nonexistent-linker[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+// custom linker set via `target.$tuple.linker` have precede over `target.'cfg(..)'.linker`
+#[cargo_test]
+fn custom_linker_cfg_precedence() {
+    let target = rustc_host();
+
+    let foo = project()
+        .file("Cargo.toml", &basic_lib_manifest("foo"))
+        .file("src/lib.rs", "")
+        .file(
+            ".cargo/config.toml",
+            &format!(
+                r#"
+                    [target.'cfg(not(target_os = "none"))']
+                    linker = "ignored-linker"
+                    [target.{}]
+                    linker = "nonexistent-linker"
+                "#,
+                target
+            ),
+        )
+        .build();
+
+    foo.cargo("build --verbose")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.5.0 ([ROOT]/foo)
+[RUNNING] `rustc [..]-C linker=nonexistent-linker[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_linker_cfg_collision() {
+    let foo = project()
+        .file("Cargo.toml", &basic_lib_manifest("foo"))
+        .file("src/lib.rs", "")
+        .file(
+            ".cargo/config.toml",
+            r#"
+            [target.'cfg(not(target_arch = "avr"))']
+            linker = "nonexistent-linker1"
+            [target.'cfg(not(target_os = "none"))']
+            linker = "nonexistent-linker2"
+            "#,
+        )
+        .build();
+
+    foo.cargo("build --verbose")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] several matching instances of `target.'cfg(..)'.linker` in configurations
+first match `cfg(not(target_arch = "avr"))` located in [ROOT]/foo/.cargo/config.toml
+second match `cfg(not(target_os = "none"))` located in [ROOT]/foo/.cargo/config.toml
+
+"#]])
         .run();
 }
 
@@ -49,7 +133,7 @@ fn absolute_tools() {
         .file("Cargo.toml", &basic_lib_manifest("foo"))
         .file("src/lib.rs", "")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             &format!(
                 r#"
                     [target.{target}]
@@ -62,13 +146,12 @@ fn absolute_tools() {
         .build();
 
     foo.cargo("build --verbose")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.5.0 ([CWD])
-[RUNNING] `rustc [..] -C linker=[..]bogus/nonexistent-linker [..]`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.5.0 ([ROOT]/foo)
+[RUNNING] `rustc [..]-C linker=[..]/bogus/nonexistent-linker[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -90,7 +173,7 @@ fn relative_tools() {
         .file("bar/Cargo.toml", &basic_lib_manifest("bar"))
         .file("bar/src/lib.rs", "")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             &format!(
                 r#"
                     [target.{target}]
@@ -102,18 +185,14 @@ fn relative_tools() {
         )
         .build();
 
-    let prefix = p.root().into_os_string().into_string().unwrap();
-
     p.cargo("build --verbose")
         .cwd("bar")
-        .with_stderr(&format!(
-            "\
-[COMPILING] bar v0.5.0 ([CWD])
-[RUNNING] `rustc [..] -C linker={prefix}/./tools/nonexistent-linker [..]`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-            prefix = prefix,
-        ))
+        .with_stderr_data(str![[r#"
+[COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
+[RUNNING] `rustc [..]-C linker=[ROOT]/foo/./tools/nonexistent-linker[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -126,7 +205,7 @@ fn custom_runner() {
         .file("tests/test.rs", "")
         .file("benches/bench.rs", "")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             &format!(
                 r#"
                     [target.{}]
@@ -139,38 +218,35 @@ fn custom_runner() {
 
     p.cargo("run -- --param")
         .with_status(101)
-        .with_stderr_contains(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `nonexistent-runner -r target/debug/foo[EXE] --param`
-",
-        )
+...
+"#]])
         .run();
 
     p.cargo("test --test test --verbose -- --param")
         .with_status(101)
-        .with_stderr_contains(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]`
-[FINISHED] test [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `nonexistent-runner -r [..]/target/debug/deps/test-[..][EXE] --param`
-",
-        )
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/test-[HASH][EXE] --param`
+...
+"#]])
         .run();
 
     p.cargo("bench --bench bench --verbose -- --param")
         .with_status(101)
-        .with_stderr_contains(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]`
 [RUNNING] `rustc [..]`
-[FINISHED] bench [optimized] target(s) in [..]
-[RUNNING] `nonexistent-runner -r [..]/target/release/deps/bench-[..][EXE] --param --bench`
-",
-        )
+[FINISHED] `bench` profile [optimized] target(s) in [ELAPSED]s
+[RUNNING] `nonexistent-runner -r [ROOT]/foo/target/release/build/foo/[HASH]/out/bench-[HASH][EXE] --param --bench`
+...
+"#]])
         .run();
 }
 
@@ -180,7 +256,7 @@ fn custom_runner_cfg() {
     let p = project()
         .file("src/main.rs", "fn main() {}")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             r#"
             [target.'cfg(not(target_os = "none"))']
             runner = "nonexistent-runner -r"
@@ -190,17 +266,16 @@ fn custom_runner_cfg() {
 
     p.cargo("run -- --param")
         .with_status(101)
-        .with_stderr_contains(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `nonexistent-runner -r target/debug/foo[EXE] --param`
-",
-        )
+...
+"#]])
         .run();
 }
 
-// custom runner set via `target.$triple.runner` have precedence over `target.'cfg(..)'.runner`
+// custom runner set via `target.$tuple.runner` have precedence over `target.'cfg(..)'.runner`
 #[cargo_test]
 fn custom_runner_cfg_precedence() {
     let target = rustc_host();
@@ -208,7 +283,7 @@ fn custom_runner_cfg_precedence() {
     let p = project()
         .file("src/main.rs", "fn main() {}")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             &format!(
                 r#"
                     [target.'cfg(not(target_os = "none"))']
@@ -224,13 +299,12 @@ fn custom_runner_cfg_precedence() {
 
     p.cargo("run -- --param")
         .with_status(101)
-        .with_stderr_contains(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `nonexistent-runner -r target/debug/foo[EXE] --param`
-",
-        )
+...
+"#]])
         .run();
 }
 
@@ -239,7 +313,7 @@ fn custom_runner_cfg_collision() {
     let p = project()
         .file("src/main.rs", "fn main() {}")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             r#"
             [target.'cfg(not(target_arch = "avr"))']
             runner = "true"
@@ -252,13 +326,12 @@ fn custom_runner_cfg_collision() {
 
     p.cargo("run -- --param")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] several matching instances of `target.'cfg(..)'.runner` in `.cargo/config`
-first match `cfg(not(target_arch = \"avr\"))` located in [..]/foo/.cargo/config
-second match `cfg(not(target_os = \"none\"))` located in [..]/foo/.cargo/config
-",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] several matching instances of `target.'cfg(..)'.runner` in configurations
+first match `cfg(not(target_arch = "avr"))` located in [ROOT]/foo/.cargo/config.toml
+second match `cfg(not(target_os = "none"))` located in [ROOT]/foo/.cargo/config.toml
+
+"#]])
         .run();
 }
 
@@ -271,18 +344,16 @@ fn custom_runner_env() {
     p.cargo("run")
         .env(&key, "nonexistent-runner --foo")
         .with_status(101)
-        .with_stderr(&format!(
-            "\
-[COMPILING] foo [..]
-[FINISHED] dev [..]
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `nonexistent-runner --foo target/debug/foo[EXE]`
 [ERROR] could not execute process `nonexistent-runner --foo target/debug/foo[EXE]` (never executed)
 
 Caused by:
-  {}
-",
-            no_such_file_err_msg()
-        ))
+  [NOT_FOUND]
+
+"#]])
         .run();
 }
 
@@ -308,7 +379,11 @@ fn custom_runner_env_overrides_config() {
     p.cargo("run")
         .env(&key, "should-run --foo")
         .with_status(101)
-        .with_stderr_contains("[RUNNING] `should-run --foo target/debug/foo[EXE]`")
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `should-run --foo target/debug/foo[EXE]`
+...
+"#]])
         .run();
 }
 
@@ -323,7 +398,679 @@ fn custom_runner_env_true() {
 
     p.cargo("run")
         .env(&key, "true")
-        .with_stderr_contains("[RUNNING] `true target/debug/foo[EXE]`")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `true target/debug/foo[EXE]`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_target_applies_to_host() {
+    // This ensures that without `--target` (non-cross-target mode)
+    // Cargo still respects targe configuration.
+    let target = rustc_host();
+
+    let p = project()
+        .file("src/main.rs", "fn main() {}")
+        .file(
+            ".cargo/config.toml",
+            &format!(
+                r#"
+                    [target.{}]
+                    runner = "nonexistent-runner -r"
+                "#,
+                target
+            ),
+        )
+        .build();
+
+    p.cargo("run")
+        .arg("-Ztarget-applies-to-host")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host"])
+        .env("CARGO_TARGET_APPLIES_TO_HOST", "false")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `nonexistent-runner -r target/debug/foo[EXE]`
+[ERROR] could not execute process `nonexistent-runner -r target/debug/foo[EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_proc_macro_test() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [target.{target}]
+            runner = "nonexistent-runner -r"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+[ERROR] test failed, to rerun pass `--lib`
+
+Caused by:
+  could not execute process `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_cfg_proc_macro_test() {
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [target.'cfg(all())']
+            runner = "nonexistent-runner -r"
+        "#,
+    );
+
+    p.cargo("test --lib -v")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+[ERROR] test failed, to rerun pass `--lib`
+
+Caused by:
+  could not execute process `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_proc_macro_test_with_target() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [target.{target}]
+            runner = "nonexistent-runner -r"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+[ERROR] test failed, to rerun pass `--lib`
+
+Caused by:
+  could not execute process `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_cfg_proc_macro_test_with_target() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [target.'cfg(all())']
+            runner = "nonexistent-runner -r"
+        "#,
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+[ERROR] test failed, to rerun pass `--lib`
+
+Caused by:
+  could not execute process `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_proc_macro_test_with_host_config() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [host]
+            runner = "nonexistent-host-runner"
+            [target.{target}]
+            runner = "nonexistent-target-runner"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `nonexistent-target-runner [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+[ERROR] test failed, to rerun pass `--lib`
+
+Caused by:
+  could not execute process `nonexistent-target-runner [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_cfg_proc_macro_test_with_host_config() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [host]
+            runner = "nonexistent-host-runner"
+            [target.'cfg(all())']
+            runner = "nonexistent-cfg-runner"
+        "#,
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `nonexistent-cfg-runner [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+[ERROR] test failed, to rerun pass `--lib`
+
+Caused by:
+  could not execute process `nonexistent-cfg-runner [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_cfg_proc_macro_test_with_host_config_no_target() {
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [host]
+            runner = "nonexistent-host-runner"
+            [target.'cfg(all())']
+            runner = "nonexistent-cfg-runner"
+        "#,
+    );
+
+    p.cargo("test --lib -v")
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `nonexistent-cfg-runner [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+[ERROR] test failed, to rerun pass `--lib`
+
+Caused by:
+  could not execute process `nonexistent-cfg-runner [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn host_runner_proc_macro_test() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [host]
+            runner = "nonexistent-host-runner"
+        "#,
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+...
+running 1 test
+...
+"#]])
+        .run();
+
+    p.cargo("test --lib -v")
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+...
+running 1 test
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_proc_macro_test_with_cross_target() {
+    if cross_compile_disabled() {
+        return;
+    }
+    let target = rustc_host();
+    let alternate = cross_compile_alternate();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [target.{target}]
+            runner = "nonexistent-runner -r"
+            [target.'cfg(all())']
+            runner = "nonexistent-cfg-runner"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(alternate)
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+[ERROR] test failed, to rerun pass `--lib`
+
+Caused by:
+  could not execute process `nonexistent-runner -r [ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]` (never executed)
+
+Caused by:
+  [NOT_FOUND]
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn custom_runner_proc_macro_test_with_cross_target_host_config() {
+    if cross_compile_disabled() {
+        return;
+    }
+    let target = rustc_host();
+    let alternate = cross_compile_alternate();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [host]
+            runner = "nonexistent-host-runner"
+            [target.{target}]
+            runner = "nonexistent-runner -r"
+            [target.'cfg(all())']
+            runner = "nonexistent-cfg-runner"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(alternate)
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+...
+running 1 test
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_cfg_linker_proc_macro_with_target() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [target.'cfg(all())']
+            linker = "/path/to/cfg/linker"
+        "#,
+    );
+
+    p.cargo("build -v --target")
+        .arg(&target)
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--crate-type proc-macro [..]-C linker=[..]/path/to/cfg/linker [..]`
+[ERROR] linker `[..]/path/to/cfg/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn host_linker_proc_macro() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [host]
+            linker = "/path/to/host/linker"
+            [target.{target}]
+            linker = "/path/to/target/linker"
+        "#,
+        ),
+    );
+
+    p.cargo("build -v --target")
+        .arg(&target)
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--crate-type proc-macro [..]-C linker=[..]/path/to/host/linker [..]`
+[ERROR] linker `[..]/path/to/host/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_linker_proc_macro_test() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [target.{target}]
+            linker = "/path/to/target/linker"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--test [..]-C linker=[..]/path/to/target/linker [..]`
+[ERROR] linker `[..]/path/to/target/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_cfg_linker_proc_macro_test() {
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [target.'cfg(all())']
+            linker = "/path/to/cfg/linker"
+        "#,
+    );
+
+    p.cargo("test --lib -v")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--test [..]-C linker=[..]/path/to/cfg/linker [..]`
+[ERROR] linker `[..]/path/to/cfg/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_linker_proc_macro_test_with_target() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [target.{target}]
+            linker = "/path/to/target/linker"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--test [..]-C linker=[..]/path/to/target/linker [..]`
+[ERROR] linker `[..]/path/to/target/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_cfg_linker_proc_macro_test_with_target() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [target.'cfg(all())']
+            linker = "/path/to/cfg/linker"
+        "#,
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--test [..]-C linker=[..]/path/to/cfg/linker [..]`
+[ERROR] linker `[..]/path/to/cfg/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn host_linker_proc_macro_test() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [host]
+            linker = "/path/to/host/linker"
+            [target.{target}]
+            linker = "/path/to/target/linker"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--test [..]-C linker=[..]/path/to/host/linker [..]`
+[ERROR] linker `[..]/path/to/host/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_cfg_linker_proc_macro_test_with_host_config() {
+    let target = rustc_host();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        r#"
+            [host]
+            linker = "/path/to/host/linker"
+            [target.'cfg(all())']
+            linker = "/path/to/cfg/linker"
+        "#,
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(&target)
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--test [..]-C linker=[..]/path/to/host/linker [..]`
+[ERROR] linker `[..]/path/to/host/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_linker_proc_macro_test_with_cross_target() {
+    if cross_compile_disabled() {
+        return;
+    }
+    let target = rustc_host();
+    let alternate = cross_compile_alternate();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [target.{target}]
+            linker = "/path/to/target/linker"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(alternate)
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--test [..]-C linker=[..]/path/to/target/linker [..]`
+[ERROR] linker `[..]/path/to/target/linker` not found
+...
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn target_linker_proc_macro_test_with_cross_target_host_config() {
+    if cross_compile_disabled() {
+        return;
+    }
+    let target = rustc_host();
+    let alternate = cross_compile_alternate();
+    let p = proc_macro_package();
+    p.change_file(
+        ".cargo/config.toml",
+        &format!(
+            r#"
+            [host]
+            linker = "/path/to/host/linker"
+            [target.{target}]
+            linker = "/path/to/target/linker"
+            [target.'cfg(all())']
+            linker = "/path/to/cfg/linker"
+        "#,
+        ),
+    );
+
+    p.cargo("test --lib -v --target")
+        .arg(alternate)
+        .arg("-Ztarget-applies-to-host")
+        .arg("-Zhost-config")
+        .masquerade_as_nightly_cargo(&["target-applies-to-host", "host-config"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]--test [..]-C linker=[..]/path/to/host/linker [..]`
+[ERROR] linker `[..]/path/to/host/linker` not found
+...
+"#]])
         .run();
 }
 
@@ -336,17 +1083,16 @@ fn custom_linker_env() {
     p.cargo("build -v")
         .env(&key, "nonexistent-linker")
         .with_status(101)
-        .with_stderr_contains("[RUNNING] `rustc [..]-C linker=nonexistent-linker [..]")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc [..]-C linker=nonexistent-linker[..]`
+...
+"#]])
         .run();
 }
 
 #[cargo_test]
 fn target_in_environment_contains_lower_case() {
-    if cfg!(windows) && !cargo_test_support::is_nightly() {
-        // Remove this check when 1.55 is stabilized.
-        // https://github.com/rust-lang/rust/pull/85270
-        return;
-    }
     let p = project().file("src/main.rs", "fn main() {}").build();
 
     let target = rustc_host();
@@ -358,11 +1104,13 @@ fn target_in_environment_contains_lower_case() {
     p.cargo("build -v --target")
         .arg(target)
         .env(&env_key, "nonexistent-linker")
-        .with_stderr_contains(format!(
-            "warning: Environment variables are expected to use uppercase \
-             letters and underscores, the variable `{}` will be ignored and \
-             have no effect",
-            env_key
+        .with_stderr_data(format!("\
+[WARNING] environment variables are expected to use uppercase letters and underscores, the variable `{env_key}` will be ignored and have no effect
+[WARNING] environment variables are expected to use uppercase letters and underscores, the variable `{env_key}` will be ignored and have no effect
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo --edition=2015 src/main.rs [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+"
         ))
         .run();
 }
@@ -372,7 +1120,7 @@ fn cfg_ignored_fields() {
     // Test for some ignored fields in [target.'cfg()'] tables.
     let p = project()
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             r#"
             # Try some empty tables.
             [target.'cfg(not(foo))']
@@ -392,16 +1140,33 @@ fn cfg_ignored_fields() {
         .build();
 
     p.cargo("check")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [WARNING] unused key `somelib` in [target] config table `cfg(not(bar))`
-[WARNING] unused key `ar` in [target] config table `cfg(not(target_os = \"none\"))`
-[WARNING] unused key `foo` in [target] config table `cfg(not(target_os = \"none\"))`
-[WARNING] unused key `invalid` in [target] config table `cfg(not(target_os = \"none\"))`
-[WARNING] unused key `linker` in [target] config table `cfg(not(target_os = \"none\"))`
-[CHECKING] foo v0.0.1 ([..])
-[FINISHED] [..]
-",
-        )
+[WARNING] unused key `ar` in [target] config table `cfg(not(target_os = "none"))`
+[WARNING] unused key `foo` in [target] config table `cfg(not(target_os = "none"))`
+[WARNING] unused key `invalid` in [target] config table `cfg(not(target_os = "none"))`
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
+}
+
+/// Creates a bare proc-macro package with a unit test.
+fn proc_macro_package() -> Project {
+    project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.0"
+                edition = "2015"
+
+                [lib]
+                proc-macro = true
+            "#,
+        )
+        .file("src/lib.rs", "#[test] fn it_works() {}")
+        .build()
 }

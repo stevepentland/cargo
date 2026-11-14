@@ -1,22 +1,27 @@
 //! Tests for git authentication.
 
-use std::collections::HashSet;
-use std::io::prelude::*;
+use cargo_util::collections::HashSet;
 use std::io::BufReader;
+use std::io::prelude::*;
 use std::net::{SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
+use crate::prelude::*;
+use cargo_test_support::basic_manifest;
 use cargo_test_support::paths;
-use cargo_test_support::{basic_manifest, project};
+use cargo_test_support::project;
+use cargo_test_support::str;
 
 fn setup_failed_auth_test() -> (SocketAddr, JoinHandle<()>, Arc<AtomicUsize>) {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = server.local_addr().unwrap();
 
     fn headers(rdr: &mut dyn BufRead) -> HashSet<String> {
-        let valid = ["GET", "Authorization", "Accept"];
+        let valid = ["GET ", "Authorization:", "Accept:"];
         rdr.lines()
             .map(|s| s.unwrap())
             .take_while(|s| s.len() > 2)
@@ -110,9 +115,10 @@ fn http_auth_offered() {
             "Cargo.toml",
             &format!(
                 r#"
-                    [project]
+                    [package]
                     name = "foo"
                     version = "0.0.1"
+                    edition = "2015"
                     authors = []
 
                     [dependencies.bar]
@@ -123,47 +129,72 @@ fn http_auth_offered() {
         )
         .file("src/main.rs", "")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             "[net]
              retry = 0
             ",
         )
         .build();
 
-    // This is a "contains" check because the last error differs by platform,
-    // may span multiple lines, and isn't relevant to this test.
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr_contains(&format!(
+        .with_stderr_data(&format!(
             "\
 [UPDATING] git repository `http://{addr}/foo/bar`
-[ERROR] failed to get `bar` as a dependency of package `foo v0.0.1 [..]`
+fatal: Authentication failed for 'http://{addr}/foo/bar/'
+[ERROR] failed to get `bar` as a dependency of package `foo v0.0.1 ([ROOT]/foo)`
 
 Caused by:
   failed to load source for dependency `bar`
 
 Caused by:
-  Unable to update http://{addr}/foo/bar
+  unable to update http://{addr}/foo/bar
 
 Caused by:
-  failed to clone into: [..]
+  failed to clone into: [ROOT]/home/.cargo/git/db/bar-[HASH]
 
 Caused by:
-  failed to authenticate when downloading repository
+  `git fetch` failed for http://{addr}/foo/bar
 
-  * attempted to find username/password via `credential.helper`, but [..]
-
-  if the git CLI succeeds then `net.git-fetch-with-cli` may help here
-  https://[..]
-
-Caused by:
-",
-            addr = addr
+  [HELP] re-try with `net.git-fetch-with-cli = false` to see if it resolves the problem
+  https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli
+"
         ))
         .run();
-
     assert_eq!(connections.load(SeqCst), 2);
     t.join().ok().unwrap();
+}
+
+#[cargo_test]
+fn http_auth_offered_gitoxide() {
+    let (addr, t, connections) = setup_failed_auth_test();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            &format!(
+                r#"
+                    {}
+                    [dependencies]
+                    bar = {{ git = "http://{addr}/foo/bar" }}
+                "#,
+                basic_manifest("foo", "0.0.1")
+            ),
+        )
+        .file("src/main.rs", "")
+        .build();
+
+    p.cargo("check -Zgitoxide=fetch --config net.git-fetch-with-cli=false --config net.retry=0")
+        .masquerade_as_nightly_cargo(&["gitoxide"])
+        .with_status(101)
+        .with_stderr_contains("[..]failed to authenticate when downloading repository[..]")
+        .with_stderr_contains("[..]credentials were incorrect[..]")
+        .run();
+    assert_eq!(
+        connections.load(SeqCst),
+        2,
+        "expected an unauthenticated request, then one retry with credential.helper credentials after HTTP 401"
+    );
+    t.join().unwrap();
 }
 
 // Boy, sure would be nice to have a TLS implementation in rust!
@@ -183,9 +214,10 @@ fn https_something_happens() {
             "Cargo.toml",
             &format!(
                 r#"
-                    [project]
+                    [package]
                     name = "foo"
                     version = "0.0.1"
+                    edition = "2015"
                     authors = []
 
                     [dependencies.bar]
@@ -196,34 +228,37 @@ fn https_something_happens() {
         )
         .file("src/main.rs", "")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             "[net]
              retry = 0
             ",
         )
         .build();
 
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_status(101)
-        .with_stderr_contains(&format!(
-            "[UPDATING] git repository `https://{addr}/foo/bar`",
-            addr = addr
-        ))
-        .with_stderr_contains(&format!(
+        .with_stderr_data(&format!(
             "\
+[UPDATING] git repository `https://{addr}/foo/bar`
+[RUNNING] `git [..] fetch [..]`
+fatal: unable to access 'https://{addr}/foo/bar/': [..]
+[ERROR] failed to get `bar` as a dependency of package `foo v0.0.1 ([ROOT]/foo)`
+
 Caused by:
-  {errmsg}
-",
-            errmsg = if cfg!(windows) {
-                "[..]failed to send request: [..]"
-            } else if cfg!(target_os = "macos") {
-                // macOS is difficult to tests as some builds may use Security.framework,
-                // while others may use OpenSSL. In that case, let's just not verify the error
-                // message here.
-                "[..]"
-            } else {
-                "[..]SSL error: [..]"
-            }
+  failed to load source for dependency `bar`
+
+Caused by:
+  unable to update https://{addr}/foo/bar
+
+Caused by:
+  failed to clone into: [ROOT]/home/.cargo/git/db/bar-[HASH]
+
+Caused by:
+  `git fetch` failed for https://{addr}/foo/bar
+
+  [HELP] re-try with `net.git-fetch-with-cli = false` to see if it resolves the problem
+  https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli
+"
         ))
         .run();
 
@@ -231,12 +266,14 @@ Caused by:
 }
 
 // It would sure be nice to have an SSH implementation in Rust!
-#[cargo_test]
+#[cargo_test(requires = "ssh")]
 fn ssh_something_happens() {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = server.local_addr().unwrap();
-    let t = thread::spawn(move || {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
         drop(server.accept().unwrap());
+        tx.send(()).unwrap();
     });
 
     let p = project()
@@ -244,9 +281,10 @@ fn ssh_something_happens() {
             "Cargo.toml",
             &format!(
                 r#"
-                    [project]
+                    [package]
                     name = "foo"
                     version = "0.0.1"
+                    edition = "2015"
                     authors = []
 
                     [dependencies.bar]
@@ -258,20 +296,34 @@ fn ssh_something_happens() {
         .file("src/main.rs", "")
         .build();
 
-    p.cargo("build -v")
-        .with_status(101)
-        .with_stderr_contains(&format!(
-            "[UPDATING] git repository `ssh://{addr}/foo/bar`",
-            addr = addr
-        ))
-        .with_stderr_contains(
-            "\
+    let expected = format!(
+        "\
+[UPDATING] git repository `ssh://{addr}/foo/bar`
+[RUNNING] `git [..] fetch [..]`
+...
+[ERROR] failed to get `bar` as a dependency of package `foo v0.0.1 ([ROOT]/foo)`
+
 Caused by:
-  [..]failed to start SSH session: Failed getting banner[..]
-",
-        )
+  failed to load source for dependency `bar`
+
+Caused by:
+  unable to update ssh://{addr}/foo/bar
+
+Caused by:
+  failed to clone into: [ROOT]/home/.cargo/git/db/bar-[HASH]
+
+Caused by:
+  `git fetch` failed for ssh://{addr}/foo/bar
+
+  [HELP] re-try with `net.git-fetch-with-cli = false` to see if it resolves the problem
+  https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli
+"
+    );
+    p.cargo("check -v")
+        .with_status(101)
+        .with_stderr_data(expected)
         .run();
-    t.join().ok().unwrap();
+    rx.recv_timeout(Duration::from_secs(30)).unwrap();
 }
 
 #[cargo_test]
@@ -283,6 +335,7 @@ fn net_err_suggests_fetch_with_cli() {
                 [package]
                 name = "foo"
                 version = "0.0.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -292,46 +345,47 @@ fn net_err_suggests_fetch_with_cli() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build -v")
+    p.cargo("check -v")
+        .env("CARGO_NET_GIT_FETCH_WITH_CLI", "false")
         .with_status(101)
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [UPDATING] git repository `ssh://needs-proxy.invalid/git`
-warning: spurious network error[..]
-warning: spurious network error[..]
-[ERROR] failed to get `foo` as a dependency of package `foo v0.0.0 [..]`
+[WARNING] spurious network error (3 tries remaining): [..] resolve [..] needs-proxy.invalid: [..] known[..]
+[WARNING] spurious network error (2 tries remaining): [..] resolve [..] needs-proxy.invalid: [..] known[..]
+[WARNING] spurious network error (1 try remaining): [..] resolve [..] needs-proxy.invalid: [..] known[..]
+[ERROR] failed to get `foo` as a dependency of package `foo v0.0.0 ([ROOT]/foo)`
 
 Caused by:
   failed to load source for dependency `foo`
 
 Caused by:
-  Unable to update ssh://needs-proxy.invalid/git
+  unable to update ssh://needs-proxy.invalid/git
 
 Caused by:
-  failed to clone into: [..]
+  failed to clone into: [ROOT]/home/.cargo/git/db/git-[HASH]
 
 Caused by:
   network failure seems to have happened
   if a proxy or similar is necessary `net.git-fetch-with-cli` may help here
-  https://[..]
+  https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli
 
 Caused by:
-  failed to resolve address for needs-proxy.invalid[..]
-",
-        )
+  failed to resolve address for needs-proxy.invalid: [..] known[..]; class=Net (12)
+
+"#]])
         .run();
 
     p.change_file(
-        ".cargo/config",
+        ".cargo/config.toml",
         "
             [net]
             git-fetch-with-cli = true
             ",
     );
 
-    p.cargo("build -v")
+    p.cargo("check -v")
         .with_status(101)
-        .with_stderr_contains("[..]Unable to update[..]")
+        .with_stderr_contains("[..]unable to update[..]")
         .with_stderr_does_not_contain("[..]try enabling `git-fetch-with-cli`[..]")
         .run();
 }
@@ -351,9 +405,10 @@ fn instead_of_url_printed() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -363,34 +418,30 @@ fn instead_of_url_printed() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build")
+    p.cargo("check")
         .with_status(101)
-        .with_stderr(&format!(
+        .with_stderr_data(&format!(
             "\
 [UPDATING] git repository `https://foo.bar/foo/bar`
-[ERROR] failed to get `bar` as a dependency of package `foo [..]`
+fatal: Authentication failed for 'http://{addr}/foo/bar/'
+...
+[ERROR] failed to get `bar` as a dependency of package `foo v0.0.1 ([ROOT]/foo)`
 
 Caused by:
   failed to load source for dependency `bar`
 
 Caused by:
-  Unable to update https://foo.bar/foo/bar
+  unable to update https://foo.bar/foo/bar
 
 Caused by:
-  failed to clone into: [..]
+  failed to clone into: [ROOT]/home/.cargo/git/db/bar-[HASH]
 
 Caused by:
-  failed to authenticate when downloading repository: http://{addr}/foo/bar
+  `git fetch` failed for https://foo.bar/foo/bar
 
-  * attempted to find username/password via `credential.helper`, but maybe the found credentials were incorrect
-
-  if the git CLI succeeds then `net.git-fetch-with-cli` may help here
-  https://[..]
-
-Caused by:
-  [..]
-",
-            addr = addr
+  [HELP] re-try with `net.git-fetch-with-cli = false` to see if it resolves the problem
+  https://doc.rust-lang.org/cargo/reference/config.html#netgit-fetch-with-cli
+"
         ))
         .run();
 

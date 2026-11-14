@@ -1,24 +1,8 @@
 //! Tests for named profiles.
 
-use cargo_test_support::paths::CargoPathExt;
-use cargo_test_support::{basic_lib_manifest, project};
-
-#[cargo_test]
-fn gated() {
-    let p = project().file("src/lib.rs", "").build();
-    // `rustc`, `fix`, and `check` have had `--profile` before custom named profiles.
-    // Without unstable, these shouldn't be allowed to access non-legacy names.
-    for command in [
-        "rustc", "fix", "check", "bench", "clean", "install", "test", "build", "doc", "run",
-        "rustdoc",
-    ] {
-        p.cargo(command)
-            .arg("--profile=release")
-            .with_status(101)
-            .with_stderr("error: usage of `--profile` requires `-Z unstable-options`")
-            .run();
-    }
-}
+use crate::prelude::*;
+use cargo_test_support::registry::Package;
+use cargo_test_support::{basic_lib_manifest, project, str};
 
 #[cargo_test]
 fn inherits_on_release() {
@@ -26,11 +10,10 @@ fn inherits_on_release() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.release]
@@ -41,13 +24,11 @@ fn inherits_on_release() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [ERROR] `inherits` must not be specified in root profile `release`
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -57,11 +38,10 @@ fn missing_inherits() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.release-lto]
@@ -72,14 +52,11 @@ fn missing_inherits() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] profile `release-lto` is missing an `inherits` directive \
-    (`inherits` is required for all profiles except `dev` or `release`)
-",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] profile `release-lto` is missing an `inherits` directive (`inherits` is required for all profiles except `dev` or `release`)
+
+"#]])
         .run();
 }
 
@@ -89,11 +66,10 @@ fn invalid_profile_name() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.'.release-lto']
@@ -105,32 +81,32 @@ fn invalid_profile_name() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at [..]
+        .with_stderr_data(str![[r#"
+[ERROR] invalid character `.` in profile name: `.release-lto`, allowed characters are letters, numbers, underscore, and hyphen
+ --> Cargo.toml:8:26
+  |
+8 |                 [profile.'.release-lto']
+  |                          ^^^^^^^^^^^^^^
 
-Caused by:
-  invalid character `.` in profile name `.release-lto`
-  Allowed characters are letters, numbers, underscore, and hyphen.
-",
-        )
+"#]])
         .run();
 }
 
 #[cargo_test]
-#[ignore] // dir-name is currently disabled
+// We are currently uncertain if dir-name will ever be exposed to the user.
+// The code for it still roughly exists, but only for the internal profiles.
+// This test was kept in case we ever want to enable support for it again.
+#[ignore = "dir-name is disabled"]
 fn invalid_dir_name() {
     let p = project()
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.'release-lto']
@@ -143,15 +119,14 @@ fn invalid_dir_name() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at [..]
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   Invalid character `.` in dir-name: `.subdir`",
-        )
+
+"#]])
         .run();
 }
 
@@ -161,11 +136,10 @@ fn dir_name_disabled() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [profile.release-lto]
                 inherits = "release"
@@ -177,17 +151,14 @@ fn dir_name_disabled() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[ROOT]/foo/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
-  dir-name=\"lto\" in profile `release-lto` is not currently allowed, \
-  directory names are tied to the profile name for custom profiles
-",
-        )
+  dir-name="lto" in profile `release-lto` is not currently allowed, directory names are tied to the profile name for custom profiles
+
+"#]])
         .run();
 }
 
@@ -197,11 +168,10 @@ fn invalid_inherits() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.'release-lto']
@@ -213,12 +183,11 @@ fn invalid_inherits() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "error: profile `release-lto` inherits from `.release`, \
-             but that profile is not defined",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] profile `release-lto` inherits from `.release`, but that profile is not defined
+
+"#]])
         .run();
 }
 
@@ -228,11 +197,10 @@ fn non_existent_inherits() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.release-lto]
@@ -244,13 +212,11 @@ fn non_existent_inherits() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [ERROR] profile `release-lto` inherits from `non-existent`, but that profile is not defined
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -260,11 +226,10 @@ fn self_inherits() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.release-lto]
@@ -276,13 +241,11 @@ fn self_inherits() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [ERROR] profile inheritance loop detected with profile `release-lto` inheriting `release-lto`
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -292,11 +255,10 @@ fn inherits_loop() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.release-lto]
@@ -312,13 +274,11 @@ fn inherits_loop() {
         .build();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
         .with_status(101)
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [ERROR] profile inheritance loop detected with profile `release-lto2` inheriting `release-lto`
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -328,11 +288,10 @@ fn overrides_with_custom() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -353,6 +312,9 @@ fn overrides_with_custom() {
 
                 [profile.other.package.yyy]
                 codegen-units = 6
+
+                [lints.cargo]
+                default = "allow"
             "#,
         )
         .file("src/lib.rs", "")
@@ -365,33 +327,36 @@ fn overrides_with_custom() {
     // profile overrides are inherited between profiles using inherits and have a
     // higher priority than profile options provided by custom profiles
     p.cargo("build -v")
-        .masquerade_as_nightly_cargo()
-        .with_stderr_unordered(
-            "\
-[COMPILING] xxx [..]
-[COMPILING] yyy [..]
-[COMPILING] foo [..]
+        .with_stderr_data(
+            str![[r#"
+[LOCKING] 2 packages to highest compatible versions
+[COMPILING] xxx v0.5.0 ([ROOT]/foo/xxx)
+[COMPILING] yyy v0.5.0 ([ROOT]/foo/yyy)
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name xxx [..] -C codegen-units=5 [..]`
 [RUNNING] `rustc --crate-name yyy [..] -C codegen-units=3 [..]`
 [RUNNING] `rustc --crate-name foo [..] -C codegen-units=7 [..]`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 
     // This also verifies that the custom profile names appears in the finished line.
-    p.cargo("build --profile=other -Z unstable-options -v")
-        .masquerade_as_nightly_cargo()
-        .with_stderr_unordered(
-            "\
-[COMPILING] xxx [..]
-[COMPILING] yyy [..]
-[COMPILING] foo [..]
+    p.cargo("build --profile=other -v")
+        .with_stderr_data(
+            str![[r#"
+[COMPILING] xxx v0.5.0 ([ROOT]/foo/xxx)
+[COMPILING] yyy v0.5.0 ([ROOT]/foo/yyy)
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc --crate-name xxx [..] -C codegen-units=5 [..]`
 [RUNNING] `rustc --crate-name yyy [..] -C codegen-units=6 [..]`
 [RUNNING] `rustc --crate-name foo [..] -C codegen-units=2 [..]`
-[FINISHED] other [unoptimized + debuginfo] target(s) in [..]
-",
+[FINISHED] `other` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -405,34 +370,47 @@ fn conflicting_usage() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
             "#,
         )
-        .file("src/lib.rs", "")
+        .file("src/main.rs", "fn main() {}")
         .build();
 
-    p.cargo("build -Z unstable-options --profile=dev --release")
-        .masquerade_as_nightly_cargo()
-        .with_status(101)
-        .with_stderr(
-            "\
-error: conflicting usage of --profile=dev and --release
-The `--release` flag is the same as `--profile=release`.
-Remove one flag or the other to continue.
-",
-        )
+    p.cargo("build --profile=dev --release")
+        .with_status(1)
+        .with_stderr_data(str![[r#"
+[ERROR] the argument '--profile <PROFILE-NAME>' cannot be used with '--release'
+
+Usage: cargo[EXE] build --profile <PROFILE-NAME>
+
+For more information, try '--help'.
+
+"#]])
         .run();
 
-    p.cargo("install -Z unstable-options --profile=release --debug")
-        .masquerade_as_nightly_cargo()
-        .with_status(101)
-        .with_stderr(
-            "\
-error: conflicting usage of --profile=release and --debug
-The `--debug` flag is the same as `--profile=dev`.
-Remove one flag or the other to continue.
-",
-        )
+    p.cargo("install --profile=release --debug")
+        .with_status(1)
+        .with_stderr_data(str![[r#"
+[ERROR] the argument '--profile <PROFILE-NAME>' cannot be used with '--debug'
+
+Usage: cargo[EXE] install --profile <PROFILE-NAME> [CRATE[@<VER>]]...
+
+For more information, try '--help'.
+
+"#]])
+        .run();
+
+    p.cargo("check --profile=dev --release")
+        .with_status(1)
+        .with_stderr_data(str![[r#"
+[ERROR] the argument '--profile <PROFILE-NAME>' cannot be used with '--release'
+
+Usage: cargo[EXE] check --profile <PROFILE-NAME>
+
+For more information, try '--help'.
+
+"#]])
         .run();
 }
 
@@ -442,11 +420,10 @@ fn clean_custom_dirname() {
         .file(
             "Cargo.toml",
             r#"
-                cargo-features = ["named-profiles"]
-
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [profile.other]
@@ -457,67 +434,52 @@ fn clean_custom_dirname() {
         .build();
 
     p.cargo("build --release")
-        .masquerade_as_nightly_cargo()
-        .with_stdout("")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([..])
-[FINISHED] release [optimized] target(s) in [..]
-",
-        )
+        .with_stdout_data("")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
-    p.cargo("clean -p foo").masquerade_as_nightly_cargo().run();
+    p.cargo("clean -p foo").run();
 
     p.cargo("build --release")
-        .masquerade_as_nightly_cargo()
-        .with_stdout("")
-        .with_stderr(
-            "\
-[FINISHED] release [optimized] target(s) in [..]
-",
-        )
+        .with_stdout_data("")
+        .with_stderr_data(str![[r#"
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
-    p.cargo("clean -p foo --release")
-        .masquerade_as_nightly_cargo()
-        .run();
+    p.cargo("clean -p foo --release").run();
 
     p.cargo("build --release")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([..])
-[FINISHED] release [optimized] target(s) in [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     p.cargo("build")
-        .masquerade_as_nightly_cargo()
-        .with_stdout("")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([..])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-",
-        )
+        .with_stdout_data("")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
-    p.cargo("build -Z unstable-options --profile=other")
-        .masquerade_as_nightly_cargo()
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([..])
-[FINISHED] other [optimized] target(s) in [..]
-",
-        )
+    p.cargo("build --profile=other")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `other` profile [optimized] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
-    p.cargo("clean")
-        .arg("--release")
-        .masquerade_as_nightly_cargo()
-        .run();
+    p.cargo("clean").arg("--release").run();
 
     // Make sure that 'other' was not cleaned
     assert!(p.build_dir().is_dir());
@@ -526,9 +488,11 @@ fn clean_custom_dirname() {
     assert!(!p.build_dir().join("release").is_dir());
 
     // This should clean 'other'
-    p.cargo("clean -Z unstable-options --profile=other")
-        .masquerade_as_nightly_cargo()
-        .with_stderr("")
+    p.cargo("clean --profile=other")
+        .with_stderr_data(str![[r#"
+[REMOVED] [FILE_NUM] files, [FILE_SIZE]B total
+
+"#]])
         .run();
     assert!(p.build_dir().join("debug").is_dir());
     assert!(!p.build_dir().join("other").is_dir());
@@ -540,25 +504,28 @@ fn unknown_profile() {
         .file(
             "Cargo.toml",
             r#"
-            cargo-features = ["named-profiles"]
-
             [package]
             name = "foo"
             version = "0.0.1"
+            edition = "2015"
             "#,
         )
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build --profile alpha -Zunstable-options")
-        .masquerade_as_nightly_cargo()
-        .with_stderr("[ERROR] profile `alpha` is not defined")
+    p.cargo("build --profile alpha")
+        .with_stderr_data(str![[r#"
+[ERROR] profile `alpha` is not defined
+
+"#]])
         .with_status(101)
         .run();
     // Clean has a separate code path, need to check it too.
-    p.cargo("clean --profile alpha -Zunstable-options")
-        .masquerade_as_nightly_cargo()
-        .with_stderr("[ERROR] profile `alpha` is not defined")
+    p.cargo("clean --profile alpha")
+        .with_stderr_data(str![[r#"
+[ERROR] profile `alpha` is not defined
+
+"#]])
         .with_status(101)
         .run();
 }
@@ -572,6 +539,7 @@ fn reserved_profile_names() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [profile.doc]
                 opt-level = 1
@@ -580,19 +548,20 @@ fn reserved_profile_names() {
         .file("src/lib.rs", "")
         .build();
 
-    p.cargo("build --profile=doc -Zunstable-options")
-        .masquerade_as_nightly_cargo()
+    p.cargo("build --profile=doc")
         .with_status(101)
-        .with_stderr("error: profile `doc` is reserved and not allowed to be explicitly specified")
+        .with_stderr_data(str![[r#"
+[ERROR] profile `doc` is reserved and not allowed to be explicitly specified
+
+"#]])
         .run();
     // Not an exhaustive list, just a sample.
     for name in ["build", "cargo", "check", "rustc", "CaRgO_startswith"] {
-        p.cargo(&format!("build --profile={} -Zunstable-options", name))
-            .masquerade_as_nightly_cargo()
+        p.cargo(&format!("build --profile={}", name))
             .with_status(101)
-            .with_stderr(&format!(
+            .with_stderr_data(&format!(
                 "\
-error: profile name `{}` is reserved
+[ERROR] profile name `{}` is reserved
 Please choose a different name.
 See https://doc.rust-lang.org/cargo/reference/profiles.html for more on configuring profiles.
 ",
@@ -605,11 +574,10 @@ See https://doc.rust-lang.org/cargo/reference/profiles.html for more on configur
             "Cargo.toml",
             &format!(
                 r#"
-                    cargo-features = ["named-profiles"]
-
                     [package]
                     name = "foo"
                     version = "0.1.0"
+                    edition = "2015"
 
                     [profile.{}]
                     opt-level = 1
@@ -618,53 +586,22 @@ See https://doc.rust-lang.org/cargo/reference/profiles.html for more on configur
             ),
         );
 
+        let highlight = "^".repeat(name.len());
         p.cargo("build")
-            .masquerade_as_nightly_cargo()
             .with_status(101)
-            .with_stderr(&format!(
+            .with_stderr_data(&format!(
                 "\
-error: failed to parse manifest at `[ROOT]/foo/Cargo.toml`
-
-Caused by:
-  profile name `{}` is reserved
-  Please choose a different name.
-  See https://doc.rust-lang.org/cargo/reference/profiles.html for more on configuring profiles.
-",
-                name
+[ERROR] profile name `{name}` is reserved
+       Please choose a different name.
+       See https://doc.rust-lang.org/cargo/reference/profiles.html for more on configuring profiles.
+ --> Cargo.toml:7:30
+  |
+7 |                     [profile.{name}]
+  |                              {highlight}
+"
             ))
             .run();
     }
-
-    p.change_file(
-        "Cargo.toml",
-        r#"
-               cargo-features = ["named-profiles"]
-
-               [package]
-               name = "foo"
-               version = "0.1.0"
-               authors = []
-
-               [profile.debug]
-               debug = 1
-               inherits = "dev"
-            "#,
-    );
-
-    p.cargo("build")
-        .masquerade_as_nightly_cargo()
-        .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[ROOT]/foo/Cargo.toml`
-
-Caused by:
-  profile name `debug` is reserved
-  To configure the default development profile, use the name `dev` as in [profile.dev]
-  See https://doc.rust-lang.org/cargo/reference/profiles.html for more on configuring profiles.
-",
-        )
-        .run();
 }
 
 #[cargo_test]
@@ -674,11 +611,10 @@ fn legacy_commands_support_custom() {
         .file(
             "Cargo.toml",
             r#"
-               cargo-features = ["named-profiles"]
-
                [package]
                name = "foo"
                version = "0.1.0"
+               edition = "2015"
 
                [profile.super-dev]
                codegen-units = 3
@@ -694,11 +630,203 @@ fn legacy_commands_support_custom() {
             pb.arg("--allow-no-vcs");
         }
         pb.arg("--profile=super-dev")
-            .arg("-Zunstable-options")
             .arg("-v")
-            .masquerade_as_nightly_cargo()
-            .with_stderr_contains("[RUNNING] [..]codegen-units=3[..]")
+            .with_stderr_data(str![
+                r#"
+...
+[RUNNING] [..]codegen-units=3[..]
+...
+"#
+            ])
             .run();
         p.build_dir().rm_rf();
     }
+}
+
+#[cargo_test]
+fn legacy_rustc() {
+    // `cargo rustc` historically has supported dev/test/bench/check
+    // other profiles are covered in check::rustc_check
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+
+                [profile.dev]
+                codegen-units = 3
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+    p.cargo("rustc --profile dev -v")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]-C codegen-units=3[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn test_inherits_dev() {
+    // The `test` profile inherits from `dev` for both local crates and
+    // dependencies.
+    Package::new("somedep", "1.0.0").publish();
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [dependencies]
+            somedep = "1.0"
+
+            [profile.dev]
+            debug = 0
+
+            [profile.test]
+            opt-level = 3
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+    p.cargo("test --lib --no-run -v")
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[RUNNING] `git [..] fetch [..]`
+From [ROOTURL]/registry
+ * [new ref]         HEAD       -> origin/HEAD
+[LOCKING] 1 package to highest compatible version
+[DOWNLOADING] crates ...
+[DOWNLOADED] somedep v1.0.0 (registry `dummy-registry`)
+[COMPILING] somedep v1.0.0
+[RUNNING] `rustc --crate-name somedep [..]`
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `test` profile [optimized] target(s) in [ELAPSED]s
+[EXECUTABLE] `[ROOT]/foo/target/debug/build/foo/[HASH]/out/foo-[HASH][EXE]`
+
+"#]])
+        .with_stderr_does_not_contain("[..] -C debuginfo=0[..]")
+        .with_stderr_does_not_contain("[..] -C opt-level=0[..]")
+        .with_stderr_contains("[..] -C opt-level=3[..]")
+        .run();
+}
+
+#[cargo_test]
+fn change_test_inheritance() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [profile.test]
+            inherits = "release"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+    p.cargo("test --lib --no-run")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `test` profile [optimized] target(s) in [ELAPSED]s
+[EXECUTABLE] unittests src/lib.rs (target/debug/build/foo/[HASH]/out/foo-[HASH][EXE])
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn request_test_profile() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+    p.cargo("check --profile test")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn debug_inherits_dev() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [profile.dev]
+            debug = 0
+
+            [profile.debug]
+            opt-level = 3
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+    p.cargo("check --profile=debug -v")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `debug` profile [optimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .with_stderr_does_not_contain("[..] -C debuginfo=0[..]")
+        .with_stderr_does_not_contain("[..] -C opt-level=0[..]")
+        .with_stderr_contains("[..] -C opt-level=3[..]")
+        .run();
+}
+
+#[cargo_test]
+fn change_debug_inheritance() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            edition = "2015"
+
+            [profile.debug]
+            inherits = "release"
+            debug = true
+            "#,
+        )
+        .file("src/lib.rs", "")
+        .build();
+    p.cargo("check --profile=debug")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `debug` profile [optimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
 }

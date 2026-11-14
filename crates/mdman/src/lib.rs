@@ -1,7 +1,12 @@
 //! mdman markdown to man converter.
+//!
+//! > This crate is maintained by the Cargo team, primarily for use by Cargo
+//! > and not intended for external use (except as a transitive dependency). This
+//! > crate may make major changes to its APIs or be deprecated without warning.
+#![allow(clippy::disallowed_types)]
 
-use anyhow::{bail, Context, Error};
-use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag};
+use anyhow::{Context, Error, bail};
+use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead};
@@ -64,23 +69,31 @@ pub fn convert(
 type EventIter<'a> = Box<dyn Iterator<Item = (Event<'a>, Range<usize>)> + 'a>;
 
 /// Creates a new markdown parser with the given input.
-pub(crate) fn md_parser(input: &str, url: Option<Url>) -> EventIter {
+pub(crate) fn md_parser(input: &str, url: Option<Url>) -> EventIter<'_> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_SMART_PUNCTUATION);
     let parser = Parser::new_ext(input, options);
     let parser = parser.into_offset_iter();
     // Translate all links to include the base url.
     let parser = parser.map(move |(event, range)| match event {
-        Event::Start(Tag::Link(lt, dest_url, title)) if !matches!(lt, LinkType::Email) => (
-            Event::Start(Tag::Link(lt, join_url(url.as_ref(), dest_url), title)),
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) if !matches!(link_type, LinkType::Email) => (
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url: join_url(url.as_ref(), dest_url),
+                title,
+                id,
+            }),
             range,
         ),
-        Event::End(Tag::Link(lt, dest_url, title)) if !matches!(lt, LinkType::Email) => (
-            Event::End(Tag::Link(lt, join_url(url.as_ref(), dest_url), title)),
-            range,
-        ),
+        Event::End(TagEnd::Link) => (Event::End(TagEnd::Link), range),
         _ => (event, range),
     });
     Box::new(parser)

@@ -1,6 +1,9 @@
 //! Tests for the `cargo run` command.
 
-use cargo_test_support::{basic_bin_manifest, basic_lib_manifest, project, Project};
+use crate::prelude::*;
+use cargo_test_support::{
+    Project, basic_bin_manifest, basic_lib_manifest, basic_manifest, project, str,
+};
 use cargo_util::paths::dylib_path_envvar;
 
 #[cargo_test]
@@ -10,45 +13,136 @@ fn simple() {
         .build();
 
     p.cargo("run")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target/debug/foo[EXE]`",
-        )
-        .with_stdout("hello")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
         .run();
     assert!(p.bin("foo").is_file());
 }
 
+#[cfg(windows)]
 #[cargo_test]
-fn simple_quiet() {
+fn explicit_child_breakaway() {
+    let p = project()
+        .file(
+            "src/main.rs",
+            r#"
+                use std::os::windows::process::CommandExt;
+                use std::process::Command;
+
+                const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+
+                fn main() {
+                    if std::env::args().nth(1).as_deref() == Some("child") {
+                        println!("child ran");
+                        return;
+                    }
+
+                    let status = Command::new(std::env::current_exe().unwrap())
+                        .arg("child")
+                        .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+                        .status()
+                        .unwrap();
+                    assert!(status.success());
+                }
+            "#,
+        )
+        .build();
+
+    p.cargo("run --quiet")
+        .with_stderr_data("")
+        .with_stdout_data(str![[r#"
+child ran
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn quiet_arg() {
     let p = project()
         .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
         .build();
 
-    p.cargo("run -q").with_stdout("hello").run();
+    p.cargo("run -q")
+        .with_stderr_data("")
+        .with_stdout_data(str![[r#"
+hello
 
-    p.cargo("run --quiet").with_stdout("hello").run();
+"#]])
+        .run();
+
+    p.cargo("run --quiet")
+        .with_stderr_data("")
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
-fn simple_quiet_and_verbose() {
+fn unsupported_silent_arg() {
+    let p = project()
+        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .build();
+
+    p.cargo("run -s")
+        .with_stderr_data(str![[r#"
+[ERROR] unexpected argument '--silent' found
+
+  tip: a similar argument exists: '--quiet'
+
+Usage: cargo[EXE] run [OPTIONS] [ARGS]...
+
+For more information, try '--help'.
+
+"#]])
+        .with_status(1)
+        .run();
+
+    p.cargo("run --silent")
+        .with_stderr_data(str![[r#"
+[ERROR] unexpected argument '--silent' found
+
+  tip: a similar argument exists: '--quiet'
+
+Usage: cargo[EXE] run [OPTIONS] [ARGS]...
+
+For more information, try '--help'.
+
+"#]])
+        .with_status(1)
+        .run();
+}
+
+#[cargo_test]
+fn quiet_arg_and_verbose_arg() {
     let p = project()
         .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
         .build();
 
     p.cargo("run -q -v")
         .with_status(101)
-        .with_stderr("[ERROR] cannot set both --verbose and --quiet")
+        .with_stderr_data(str![[r#"
+[ERROR] cannot set both --verbose and --quiet
+
+"#]])
         .run();
 }
 
 #[cargo_test]
-fn quiet_and_verbose_config() {
+fn quiet_arg_and_verbose_config() {
     let p = project()
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             r#"
                 [term]
                 verbose = true
@@ -57,7 +151,114 @@ fn quiet_and_verbose_config() {
         .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
         .build();
 
-    p.cargo("run -q").run();
+    p.cargo("run -q")
+        .with_stderr_data("")
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn verbose_arg_and_quiet_config() {
+    let p = project()
+        .file(
+            ".cargo/config.toml",
+            r#"
+                [term]
+                quiet = true
+            "#,
+        )
+        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .build();
+
+    p.cargo("run -v")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn quiet_config_alone() {
+    let p = project()
+        .file(
+            ".cargo/config.toml",
+            r#"
+                [term]
+                quiet = true
+            "#,
+        )
+        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .build();
+
+    p.cargo("run")
+        .with_stderr_data("")
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn verbose_config_alone() {
+    let p = project()
+        .file(
+            ".cargo/config.toml",
+            r#"
+                [term]
+                verbose = true
+            "#,
+        )
+        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .build();
+
+    p.cargo("run")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn quiet_config_and_verbose_config() {
+    let p = project()
+        .file(
+            ".cargo/config.toml",
+            r#"
+                [term]
+                verbose = true
+                quiet = true
+            "#,
+        )
+        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .build();
+
+    p.cargo("run")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] cannot set both `term.verbose` and `term.quiet`
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -109,19 +310,27 @@ fn exit_code() {
         .file("src/main.rs", "fn main() { std::process::exit(2); }")
         .build();
 
-    let mut output = String::from(
-        "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target[..]`
-",
-    );
-    if !cfg!(unix) {
-        output.push_str(
-            "[ERROR] process didn't exit successfully: `target[..]foo[..]` (exit [..]: 2)",
-        );
-    }
-    p.cargo("run").with_status(2).with_stderr(output).run();
+    let expected = if !cfg!(unix) {
+        str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+[ERROR] process didn't exit successfully: `target/debug/foo[EXE]` ([EXIT_STATUS]: 2)
+
+"#]]
+    } else {
+        str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo`
+
+"#]]
+    };
+    p.cargo("run")
+        .with_status(2)
+        .with_stderr_data(expected)
+        .run();
 }
 
 #[cargo_test]
@@ -130,21 +339,30 @@ fn exit_code_verbose() {
         .file("src/main.rs", "fn main() { std::process::exit(2); }")
         .build();
 
-    let mut output = String::from(
-        "\
-[COMPILING] foo v0.0.1 ([CWD])
+    let expected = if !cfg!(unix) {
+        str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..]`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target[..]`
-",
-    );
-    if !cfg!(unix) {
-        output.push_str(
-            "[ERROR] process didn't exit successfully: `target[..]foo[..]` (exit [..]: 2)",
-        );
-    }
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
 
-    p.cargo("run -v").with_status(2).with_stderr(output).run();
+[ERROR] process didn't exit successfully: `target/debug/foo[EXE]` ([EXIT_STATUS]: 2)
+
+"#]]
+    } else {
+        str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]]
+    };
+
+    p.cargo("run -v")
+        .with_status(2)
+        .with_stderr_data(expected)
+        .run();
 }
 
 #[cargo_test]
@@ -153,10 +371,10 @@ fn no_main_file() {
 
     p.cargo("run")
         .with_status(101)
-        .with_stderr(
-            "[ERROR] a bin target must be available \
-             for `cargo run`\n",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] a bin target must be available for `cargo run`
+
+"#]])
         .run();
 }
 
@@ -171,12 +389,11 @@ fn too_many_bins() {
     // Using [..] here because the order is not stable
     p.cargo("run")
         .with_status(101)
-        .with_stderr(
-            "[ERROR] `cargo run` could not determine which binary to run. \
-             Use the `--bin` option to specify a binary, or the \
-             `default-run` manifest key.\
-             \navailable binaries: [..]\n",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] `cargo run` could not determine which binary to run. Use the `--bin` option to specify a binary, or the `default-run` manifest key.
+available binaries: a, b
+
+"#]])
         .run();
 }
 
@@ -203,26 +420,32 @@ fn specify_name() {
         .build();
 
     p.cargo("run --bin a -v")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..] src/lib.rs [..]`
 [RUNNING] `rustc [..] src/bin/a.rs [..]`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target/debug/a[EXE]`",
-        )
-        .with_stdout("hello a.rs")
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/a[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello a.rs
+
+"#]])
         .run();
 
     p.cargo("run --bin b -v")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([..])
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
 [RUNNING] `rustc [..] src/bin/b.rs [..]`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target/debug/b[EXE]`",
-        )
-        .with_stdout("hello b.rs")
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/b[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello b.rs
+
+"#]])
         .run();
 }
 
@@ -232,9 +455,10 @@ fn specify_default_run() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 default-run = "a"
             "#,
@@ -244,9 +468,24 @@ fn specify_default_run() {
         .file("src/bin/b.rs", r#"fn main() { println!("hello B"); }"#)
         .build();
 
-    p.cargo("run").with_stdout("hello A").run();
-    p.cargo("run --bin a").with_stdout("hello A").run();
-    p.cargo("run --bin b").with_stdout("hello B").run();
+    p.cargo("run")
+        .with_stdout_data(str![[r#"
+hello A
+
+"#]])
+        .run();
+    p.cargo("run --bin a")
+        .with_stdout_data(str![[r#"
+hello A
+
+"#]])
+        .run();
+    p.cargo("run --bin b")
+        .with_stdout_data(str![[r#"
+hello B
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -255,9 +494,10 @@ fn bogus_default_run() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 default-run = "b"
             "#,
@@ -268,16 +508,15 @@ fn bogus_default_run() {
 
     p.cargo("run")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to parse manifest at `[..]/foo/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   default-run target `b` not found
 
-  <tab>Did you mean `a`?
-",
-        )
+  [HELP] a target with a similar name exists: `a`
+
+"#]])
         .run();
 }
 
@@ -290,13 +529,16 @@ fn run_example() {
         .build();
 
     p.cargo("run --example a")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target/debug/examples/a[EXE]`",
-        )
-        .with_stdout("example")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/examples/a[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+example
+
+"#]])
         .run();
 }
 
@@ -309,10 +551,11 @@ fn run_library_example() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 [[example]]
                 name = "bar"
-                crate_type = ["lib"]
+                crate-type = ["lib"]
             "#,
         )
         .file("src/lib.rs", "")
@@ -321,7 +564,10 @@ fn run_library_example() {
 
     p.cargo("run --example bar")
         .with_status(101)
-        .with_stderr("[ERROR] example target `bar` is a library and cannot be executed")
+        .with_stderr_data(str![[r#"
+[ERROR] example target `bar` is a library and cannot be executed
+
+"#]])
         .run();
 }
 
@@ -334,9 +580,10 @@ fn run_bin_example() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 [[example]]
                 name = "bar"
-                crate_type = ["bin"]
+                crate-type = ["bin"]
             "#,
         )
         .file("src/lib.rs", "")
@@ -344,13 +591,16 @@ fn run_bin_example() {
         .build();
 
     p.cargo("run --example bar")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target/debug/examples/bar[EXE]`",
-        )
-        .with_stdout("example")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/examples/bar[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+example
+
+"#]])
         .run();
 }
 
@@ -364,7 +614,7 @@ fn autodiscover_examples_project(rust_edition: &str, autoexamples: Option<bool>)
             "Cargo.toml",
             &format!(
                 r#"
-                    [project]
+                    [package]
                     name = "foo"
                     version = "0.0.1"
                     authors = []
@@ -397,14 +647,13 @@ fn run_example_autodiscover_2015() {
     let p = autodiscover_examples_project("2015", None);
     p.cargo("run --example a")
         .with_status(101)
-        .with_stderr(
-            "warning: \
-An explicit [[example]] section is specified in Cargo.toml which currently
+        .with_stderr_data(str![[r#"
+[WARNING] Cargo.toml: An explicit [[example]] section is specified in Cargo.toml which currently
 disables Cargo from automatically inferring other example targets.
 This inference behavior will change in the Rust 2018 edition and the following
 files will be included as a example target:
 
-* [..]a.rs
+* examples/a.rs
 
 This is likely to break cargo build or cargo test as these files may not be
 ready to be compiled as a example target today. You can future-proof yourself
@@ -414,9 +663,12 @@ automatically infer them to be a target, such as in subfolders.
 
 For more information on this warning you can consult
 https://github.com/rust-lang/cargo/issues/5330
-error: no example target named `a`
-",
-        )
+[WARNING] `foo` (manifest) generated 1 warning
+[ERROR] no example target named `a` in default-run packages
+[HELP] available example targets:
+    do_magic
+
+"#]])
         .run();
 }
 
@@ -424,13 +676,16 @@ error: no example target named `a`
 fn run_example_autodiscover_2015_with_autoexamples_enabled() {
     let p = autodiscover_examples_project("2015", Some(true));
     p.cargo("run --example a")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target/debug/examples/a[EXE]`",
-        )
-        .with_stdout("example")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/examples/a[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+example
+
+"#]])
         .run();
 }
 
@@ -439,7 +694,12 @@ fn run_example_autodiscover_2015_with_autoexamples_disabled() {
     let p = autodiscover_examples_project("2015", Some(false));
     p.cargo("run --example a")
         .with_status(101)
-        .with_stderr("error: no example target named `a`\n")
+        .with_stderr_data(str![[r#"
+[ERROR] no example target named `a` in default-run packages
+[HELP] available example targets:
+    do_magic
+
+"#]])
         .run();
 }
 
@@ -447,13 +707,16 @@ fn run_example_autodiscover_2015_with_autoexamples_disabled() {
 fn run_example_autodiscover_2018() {
     let p = autodiscover_examples_project("2018", None);
     p.cargo("run --example a")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target/debug/examples/a[EXE]`",
-        )
-        .with_stdout("example")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/examples/a[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+example
+
+"#]])
         .run();
 }
 
@@ -463,9 +726,10 @@ fn autobins_disables() {
         .file(
             "Cargo.toml",
             r#"
-            [project]
+            [package]
             name = "foo"
             version = "0.0.1"
+            edition = "2015"
             autobins = false
             "#,
         )
@@ -475,7 +739,10 @@ fn autobins_disables() {
 
     p.cargo("run")
         .with_status(101)
-        .with_stderr("[ERROR] a bin target must be available for `cargo run`")
+        .with_stderr_data(str![[r#"
+[ERROR] a bin target must be available for `cargo run`
+
+"#]])
         .run();
 }
 
@@ -489,9 +756,12 @@ fn run_bins() {
 
     p.cargo("run --bins")
         .with_status(1)
-        .with_stderr_contains(
-            "error: Found argument '--bins' which wasn't expected, or isn't valid in this context",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] unexpected argument '--bins' found
+
+  tip: a similar argument exists: '--bin'
+...
+"#]])
         .run();
 }
 
@@ -511,32 +781,271 @@ fn run_with_filename() {
 
     p.cargo("run --bin bin.rs")
         .with_status(101)
-        .with_stderr("[ERROR] no bin target named `bin.rs`")
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `bin.rs` in default-run packages
+[HELP] available bin targets:
+    a
+
+"#]])
         .run();
 
     p.cargo("run --bin a.rs")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] no bin target named `a.rs`
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `a.rs` in default-run packages
 
-<tab>Did you mean `a`?",
-        )
+[HELP] a target with a similar name exists: `a`
+
+"#]])
         .run();
 
     p.cargo("run --example example.rs")
         .with_status(101)
-        .with_stderr("[ERROR] no example target named `example.rs`")
+        .with_stderr_data(str![[r#"
+[ERROR] no example target named `example.rs` in default-run packages
+[HELP] available example targets:
+    a
+
+"#]])
         .run();
 
     p.cargo("run --example a.rs")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] no example target named `a.rs`
+        .with_stderr_data(str![[r#"
+[ERROR] no example target named `a.rs` in default-run packages
 
-<tab>Did you mean `a`?",
+[HELP] a target with a similar name exists: `a`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn ambiguous_bin_name() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+        [workspace]
+        resolver = "3"
+        members = ["crate1", "crate2", "crate3", "crate4"]
+        "#,
         )
+        .file("crate1/src/bin/ambiguous.rs", "fn main(){}")
+        .file(
+            "crate1/Cargo.toml",
+            r#"
+        [package]
+        name = "crate1"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        )
+        .file("crate2/src/bin/ambiguous.rs", "fn main(){}")
+        .file(
+            "crate2/Cargo.toml",
+            r#"
+        [package]
+        name = "crate2"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        )
+        .file("crate3/src/bin/ambiguous.rs", "fn main(){}")
+        .file(
+            "crate3/Cargo.toml",
+            r#"
+        [package]
+        name = "crate3"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        )
+        .file("crate4/src/bin/ambiguous.rs", "fn main(){}")
+        .file(
+            "crate4/Cargo.toml",
+            r#"
+        [package]
+        name = "crate4"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        );
+    let p = p.build();
+
+    p.cargo("run --bin ambiguous")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] `cargo run` can run at most one executable, but multiple were specified
+[HELP] available targets:
+    bin `ambiguous` in package `crate1`
+    bin `ambiguous` in package `crate2`
+    bin `ambiguous` in package `crate3`
+    bin `ambiguous` in package `crate4`
+
+"#]])
+        .run();
+
+    p.cargo("run --bin crate1/ambiguous")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `crate1/ambiguous` in default-run packages
+[HELP] available bin targets:
+    ambiguous in package crate1
+    ambiguous in package crate2
+    ambiguous in package crate3
+    ambiguous in package crate4
+
+"#]])
+        .run();
+}
+
+// See rust-lang/cargo#14544
+#[cargo_test]
+fn print_available_targets_within_virtual_workspace() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+        [workspace]
+        resolver = "3"
+        members = ["crate1", "crate2", "pattern1", "pattern2"]
+
+        default-members = ["crate1"]
+        "#,
+        )
+        .file("crate1/src/main.rs", "fn main(){}")
+        .file(
+            "crate1/Cargo.toml",
+            r#"
+        [package]
+        name = "crate1"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        )
+        .file("crate2/src/main.rs", "fn main(){}")
+        .file(
+            "crate2/Cargo.toml",
+            r#"
+        [package]
+        name = "crate2"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        )
+        .file("pattern1/src/main.rs", "fn main(){}")
+        .file(
+            "pattern1/Cargo.toml",
+            r#"
+        [package]
+        name = "pattern1"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        )
+        .file("pattern2/src/main.rs", "fn main(){}")
+        .file(
+            "pattern2/Cargo.toml",
+            r#"
+        [package]
+        name = "pattern2"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        )
+        .file("another/src/main.rs", "fn main(){}")
+        .file(
+            "another/Cargo.toml",
+            r#"
+        [package]
+        name = "another"
+        version = "0.1.0"
+        edition = "2024"
+    "#,
+        );
+
+    let p = p.build();
+    p.cargo("run --bin")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] "--bin" takes one argument.
+Available binaries:
+    crate1
+
+
+"#]])
+        .run();
+
+    p.cargo("run -p crate1 --bin crate2")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `crate2` in `crate1` package
+
+[HELP] a target with a similar name exists: `crate1`
+[HELP] available bin in `crate2` package:
+    crate2
+
+"#]])
+        .run();
+
+    p.cargo("check -p crate1 -p pattern1 -p pattern2 --bin crate2")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `crate2` in `crate1`, ... packages
+
+[HELP] a target with a similar name exists: `crate1`
+[HELP] available bin in `crate2` package:
+    crate2
+
+"#]])
+        .run();
+
+    p.cargo("run --bin crate2")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `crate2` in default-run packages
+
+[HELP] a target with a similar name exists: `crate1`
+[HELP] available bin in `crate2` package:
+    crate2
+
+"#]])
+        .run();
+
+    p.cargo("check --bin pattern*")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target matches pattern `pattern*` in default-run packages
+[HELP] available bin in `pattern1` package:
+    pattern1
+[HELP] available bin in `pattern2` package:
+    pattern2
+
+"#]])
+        .run();
+
+    // This another branch that none of similar name exists, and print available targets in the
+    // default-members.
+    p.change_file(
+        "Cargo.toml",
+        r#"
+        [workspace]
+        resolver = "3"
+        members = ["crate1", "crate2", "another"]
+
+        default-members = ["another"]
+        "#,
+    );
+
+    p.cargo("run --bin crate2")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] no bin target named `crate2` in default-run packages
+[HELP] available bin in `crate2` package:
+    crate2
+
+"#]])
         .run();
 }
 
@@ -549,11 +1058,13 @@ fn either_name_or_example() {
 
     p.cargo("run --bin a --example b")
         .with_status(101)
-        .with_stderr(
-            "[ERROR] `cargo run` can run at most one \
-             executable, but multiple were \
-             specified",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] `cargo run` can run at most one executable, but multiple were specified
+[HELP] available targets:
+    bin `a` in package `foo`
+    example `b` in package `foo`
+
+"#]])
         .run();
 }
 
@@ -570,13 +1081,16 @@ fn one_bin_multiple_examples() {
         .build();
 
     p.cargo("run")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
-[RUNNING] `target/debug/main[EXE]`",
-        )
-        .with_stdout("hello main.rs")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/main[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello main.rs
+
+"#]])
         .run();
 }
 
@@ -586,9 +1100,10 @@ fn example_with_release_flag() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -627,61 +1142,38 @@ fn example_with_release_flag() {
         .build();
 
     p.cargo("run -v --release --example a")
-        .with_stderr(
-            "\
-[COMPILING] bar v0.5.0 ([CWD]/bar)
-[RUNNING] `rustc --crate-name bar bar/src/bar.rs [..]--crate-type lib \
-        --emit=[..]link \
-        -C opt-level=3[..]\
-        -C metadata=[..] \
-        --out-dir [CWD]/target/release/deps \
-        -L dependency=[CWD]/target/release/deps`
-[COMPILING] foo v0.0.1 ([CWD])
-[RUNNING] `rustc --crate-name a examples/a.rs [..]--crate-type bin \
-        --emit=[..]link \
-        -C opt-level=3[..]\
-        -C metadata=[..] \
-        --out-dir [CWD]/target/release/examples \
-        -L dependency=[CWD]/target/release/deps \
-         --extern bar=[CWD]/target/release/deps/libbar-[..].rlib`
-[FINISHED] release [optimized] target(s) in [..]
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
+[RUNNING] `rustc --crate-name bar --edition=2015 bar/src/bar.rs [..]--crate-type lib --emit=[..]link[..] -C opt-level=3[..] -C metadata=[..]`
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name a --edition=2015 examples/a.rs [..]--crate-type bin --emit=[..]link[..] -C opt-level=3[..] -C metadata=[..]`
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
 [RUNNING] `target/release/examples/a[EXE]`
-",
-        )
-        .with_stdout(
-            "\
+
+"#]])
+        .with_stdout_data(str![[r#"
 fast1
-fast2",
-        )
+fast2
+
+"#]])
         .run();
 
     p.cargo("run -v --example a")
-        .with_stderr(
-            "\
-[COMPILING] bar v0.5.0 ([CWD]/bar)
-[RUNNING] `rustc --crate-name bar bar/src/bar.rs [..]--crate-type lib \
-        --emit=[..]link[..]\
-        -C debuginfo=2 \
-        -C metadata=[..] \
-        --out-dir [CWD]/target/debug/deps \
-        -L dependency=[CWD]/target/debug/deps`
-[COMPILING] foo v0.0.1 ([CWD])
-[RUNNING] `rustc --crate-name a examples/a.rs [..]--crate-type bin \
-        --emit=[..]link[..]\
-        -C debuginfo=2 \
-        -C metadata=[..] \
-        --out-dir [CWD]/target/debug/examples \
-        -L dependency=[CWD]/target/debug/deps \
-         --extern bar=[CWD]/target/debug/deps/libbar-[..].rlib`
-[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
+        .with_stderr_data(str![[r#"
+[COMPILING] bar v0.5.0 ([ROOT]/foo/bar)
+[RUNNING] `rustc --crate-name bar --edition=2015 bar/src/bar.rs [..]--crate-type lib --emit=[..]link [..]-C debuginfo=line-tables-only [..]-C metadata=[..]`
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name a --edition=2015 examples/a.rs [..]--crate-type bin --emit=[..]link [..]-C debuginfo=line-tables-only [..]-C metadata=[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `target/debug/examples/a[EXE]`
-",
-        )
-        .with_stdout(
-            "\
+
+"#]])
+        .with_stdout_data(str![[r#"
 slow1
-slow2",
-        )
+slow2
+
+"#]])
         .run();
 }
 
@@ -691,9 +1183,10 @@ fn run_dylib_dep() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies.bar]
@@ -724,6 +1217,216 @@ fn run_dylib_dep() {
 }
 
 #[cargo_test]
+fn run_with_bin_dep() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+
+                [dependencies.bar]
+                path = "bar"
+            "#,
+        )
+        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .file(
+            "bar/Cargo.toml",
+            r#"
+                [package]
+                name = "bar"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [[bin]]
+                name = "bar"
+            "#,
+        )
+        .file("bar/src/main.rs", r#"fn main() { println!("bar"); }"#)
+        .build();
+
+    p.cargo("run")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to highest compatible version
+[WARNING] foo v0.0.1 ([ROOT]/foo) ignoring invalid dependency `bar` which is missing a lib target
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn run_with_bin_deps() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.0.1"
+                edition = "2015"
+
+                [dependencies.bar1]
+                path = "bar1"
+                [dependencies.bar2]
+                path = "bar2"
+            "#,
+        )
+        .file("src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .file(
+            "bar1/Cargo.toml",
+            r#"
+                [package]
+                name = "bar1"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [[bin]]
+                name = "bar1"
+            "#,
+        )
+        .file("bar1/src/main.rs", r#"fn main() { println!("bar1"); }"#)
+        .file(
+            "bar2/Cargo.toml",
+            r#"
+                [package]
+                name = "bar2"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [[bin]]
+                name = "bar2"
+            "#,
+        )
+        .file("bar2/src/main.rs", r#"fn main() { println!("bar2"); }"#)
+        .build();
+
+    p.cargo("run")
+        .with_stderr_data(str![[r#"
+[LOCKING] 2 packages to highest compatible versions
+[WARNING] foo v0.0.1 ([ROOT]/foo) ignoring invalid dependency `bar1` which is missing a lib target
+[WARNING] foo v0.0.1 ([ROOT]/foo) ignoring invalid dependency `bar2` which is missing a lib target
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn run_with_bin_dep_in_workspace() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [workspace]
+                members = ["foo1", "foo2"]
+            "#,
+        )
+        .file(
+            "foo1/Cargo.toml",
+            r#"
+                [package]
+                name = "foo1"
+                version = "0.0.1"
+                edition = "2015"
+
+                [dependencies.bar1]
+                path = "bar1"
+            "#,
+        )
+        .file("foo1/src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .file(
+            "foo1/bar1/Cargo.toml",
+            r#"
+                [package]
+                name = "bar1"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [[bin]]
+                name = "bar1"
+            "#,
+        )
+        .file(
+            "foo1/bar1/src/main.rs",
+            r#"fn main() { println!("bar1"); }"#,
+        )
+        .file(
+            "foo2/Cargo.toml",
+            r#"
+                [package]
+                name = "foo2"
+                version = "0.0.1"
+                edition = "2015"
+
+                [dependencies.bar2]
+                path = "bar2"
+            "#,
+        )
+        .file("foo2/src/main.rs", r#"fn main() { println!("hello"); }"#)
+        .file(
+            "foo2/bar2/Cargo.toml",
+            r#"
+                [package]
+                name = "bar2"
+                version = "0.0.1"
+                edition = "2015"
+                authors = []
+
+                [[bin]]
+                name = "bar2"
+            "#,
+        )
+        .file(
+            "foo2/bar2/src/main.rs",
+            r#"fn main() { println!("bar2"); }"#,
+        )
+        .build();
+
+    p.cargo("run")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] `cargo run` could not determine which binary to run. Use the `--bin` option to specify a binary, or the `default-run` manifest key.
+available binaries: bar1, bar2, foo1, foo2
+
+"#]])
+        .run();
+
+    p.cargo("run --bin foo1")
+        .with_stderr_data(str![[r#"
+[WARNING] foo1 v0.0.1 ([ROOT]/foo/foo1) ignoring invalid dependency `bar1` which is missing a lib target
+[WARNING] foo2 v0.0.1 ([ROOT]/foo/foo2) ignoring invalid dependency `bar2` which is missing a lib target
+[COMPILING] foo1 v0.0.1 ([ROOT]/foo/foo1)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo1[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
 fn release_works() {
     let p = project()
         .file(
@@ -735,13 +1438,34 @@ fn release_works() {
         .build();
 
     p.cargo("run --release")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.0.1 ([CWD])
-[FINISHED] release [optimized] target(s) in [..]
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
 [RUNNING] `target/release/foo[EXE]`
-",
+
+"#]])
+        .run();
+    assert!(p.release_bin("foo").is_file());
+}
+
+#[cargo_test]
+fn release_short_works() {
+    let p = project()
+        .file(
+            "src/main.rs",
+            r#"
+                fn main() { if cfg!(debug_assertions) { panic!() } }
+            "#,
         )
+        .build();
+
+    p.cargo("run -r")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
+[RUNNING] `target/release/foo[EXE]`
+
+"#]])
         .run();
     assert!(p.release_bin("foo").is_file());
 }
@@ -752,9 +1476,10 @@ fn run_bin_different_name() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [[bin]]
@@ -798,11 +1523,15 @@ fn run_from_executable_folder() {
 
     p.cargo("run")
         .cwd(cwd)
-        .with_stderr(
-            "[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]\n\
-             [RUNNING] `./foo[EXE]`",
-        )
-        .with_stdout("hello")
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `./foo[EXE]`
+
+"#]])
+        .with_stdout_data(str![[r#"
+hello
+
+"#]])
         .run();
 }
 
@@ -822,9 +1551,10 @@ fn run_with_library_paths() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 build = "build.rs"
             "#,
@@ -834,8 +1564,8 @@ fn run_with_library_paths() {
             &format!(
                 r##"
                     fn main() {{
-                        println!(r#"cargo:rustc-link-search=native={}"#);
-                        println!(r#"cargo:rustc-link-search={}"#);
+                        println!(r#"cargo::rustc-link-search=native={}"#);
+                        println!(r#"cargo::rustc-link-search={}"#);
                     }}
                 "##,
                 dir1.display(),
@@ -881,9 +1611,10 @@ fn library_paths_sorted_alphabetically() {
         .file(
             "Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
                 build = "build.rs"
             "#,
@@ -893,9 +1624,9 @@ fn library_paths_sorted_alphabetically() {
             &format!(
                 r##"
                     fn main() {{
-                        println!(r#"cargo:rustc-link-search=native={}"#);
-                        println!(r#"cargo:rustc-link-search=native={}"#);
-                        println!(r#"cargo:rustc-link-search=native={}"#);
+                        println!(r#"cargo::rustc-link-search=native={}"#);
+                        println!(r#"cargo::rustc-link-search=native={}"#);
+                        println!(r#"cargo::rustc-link-search=native={}"#);
                     }}
                 "##,
                 dir1.display(),
@@ -932,8 +1663,8 @@ fn fail_no_extra_verbose() {
 
     p.cargo("run -q")
         .with_status(1)
-        .with_stdout("")
-        .with_stderr("")
+        .with_stdout_data("")
+        .with_stderr_data("")
         .run();
 }
 
@@ -947,6 +1678,7 @@ fn run_multiple_packages() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [workspace]
@@ -976,36 +1708,63 @@ fn run_multiple_packages() {
         process_builder
     };
 
-    cargo().arg("-p").arg("d1").with_stdout("d1").run();
+    cargo()
+        .arg("-p")
+        .arg("d1")
+        .with_stdout_data(str![[r#"
+d1
+
+"#]])
+        .run();
 
     cargo()
         .arg("-p")
         .arg("d2")
         .arg("--bin")
         .arg("d2")
-        .with_stdout("d2")
+        .with_stdout_data(str![[r#"
+d2
+
+"#]])
         .run();
 
-    cargo().with_stdout("foo").run();
+    cargo()
+        .with_stdout_data(str![[r#"
+foo
 
-    cargo().arg("-p").arg("d1").arg("-p").arg("d2")
-                    .with_status(1)
-                    .with_stderr_contains("error: The argument '--package <SPEC>' was provided more than once, but cannot be used multiple times").run();
+"#]])
+        .run();
+
+    cargo()
+        .arg("-p")
+        .arg("d1")
+        .arg("-p")
+        .arg("d2")
+        .with_status(1)
+        .with_stderr_data(str![[r#"
+[ERROR] the argument '--package [<SPEC>]' cannot be used multiple times
+...
+"#]])
+        .run();
 
     cargo()
         .arg("-p")
         .arg("d3")
         .with_status(101)
-        .with_stderr_contains("[ERROR] package(s) `d3` not found in workspace [..]")
+        .with_stderr_data(str![[r#"
+[ERROR] package(s) `d3` not found in workspace `[ROOT]/foo/foo`
+
+"#]])
         .run();
 
     cargo()
         .arg("-p")
         .arg("d*")
         .with_status(101)
-        .with_stderr_contains(
-            "[ERROR] `cargo run` does not support glob pattern `d*` on package selection",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] `cargo run` does not support glob pattern `d*` on package selection
+
+"#]])
         .run();
 }
 
@@ -1044,13 +1803,18 @@ fn run_workspace() {
 
     p.cargo("run")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] `cargo run` could not determine which binary to run[..]
-available binaries: a, b",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] `cargo run` could not determine which binary to run. Use the `--bin` option to specify a binary, or the `default-run` manifest key.
+available binaries: a, b
+
+"#]])
         .run();
-    p.cargo("run --bin a").with_stdout("run-a").run();
+    p.cargo("run --bin a")
+        .with_stdout_data(str![[r#"
+run-a
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -1066,9 +1830,10 @@ fn default_run_workspace() {
         .file(
             "a/Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "a"
                 version = "0.0.1"
+                edition = "2015"
                 default-run = "a"
             "#,
         )
@@ -1077,13 +1842,36 @@ fn default_run_workspace() {
         .file("b/src/main.rs", r#"fn main() {println!("run-b");}"#)
         .build();
 
-    p.cargo("run").with_stdout("run-a").run();
+    p.cargo("run")
+        .with_stdout_data(str![[r#"
+run-a
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn print_env_verbose() {
+    let p = project()
+        .file("Cargo.toml", &basic_manifest("a", "0.0.1"))
+        .file("src/main.rs", r#"fn main() {println!("run-a");}"#)
+        .build();
+
+    p.cargo("run -vv")
+        .with_stderr_data(str![[r#"
+[COMPILING] a v0.0.1 ([ROOT]/foo)
+[RUNNING] `[..]CARGO_MANIFEST_DIR=[ROOT]/foo[..] rustc --crate-name a[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `[..]CARGO_MANIFEST_DIR=[ROOT]/foo[..] target/debug/a[EXE]`
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
 #[cfg(target_os = "macos")]
 fn run_link_system_path_macos() {
-    use cargo_test_support::paths::{self, CargoPathExt};
+    use cargo_test_support::paths;
     use std::fs;
     // Check that the default system library path is honored.
     // First, build a shared library that will be accessed from
@@ -1092,9 +1880,10 @@ fn run_link_system_path_macos() {
         .file(
             "Cargo.toml",
             r#"
-            [project]
+            [package]
             name = "foo"
             version = "0.0.1"
+            edition = "2015"
             [lib]
             crate-type = ["cdylib"]
             "#,
@@ -1142,8 +1931,8 @@ fn run_link_system_path_macos() {
             &format!(
                 r#"
                 fn main() {{
-                    println!("cargo:rustc-link-lib=foo");
-                    println!("cargo:rustc-link-search={}");
+                    println!("cargo::rustc-link-lib=foo");
+                    println!("cargo::rustc-link-search={}");
                 }}
                 "#,
                 p.target_debug_dir().display()
@@ -1170,4 +1959,82 @@ fn run_link_system_path_macos() {
     // a value set.
     p2.cargo("run").env(VAR, &libdir).run();
     p2.cargo("test").env(VAR, &libdir).run();
+}
+
+#[cargo_test]
+fn run_binary_with_same_name_as_dependency() {
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.5.0"
+                edition = "2015"
+                authors = []
+
+                [dependencies]
+                foo = { path = "foo" }
+            "#,
+        )
+        .file(
+            "src/main.rs",
+            r#"
+                fn main() {}
+            "#,
+        )
+        .file(
+            "foo/Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+                authors = []
+
+                [lib]
+                name = "foo"
+                path = "foo.rs"
+            "#,
+        )
+        .file("foo/foo.rs", "")
+        .build();
+    p.cargo("run").run();
+    p.cargo("check -p foo@0.5.0").run();
+    p.cargo("run -p foo@0.5.0").run();
+    p.cargo("run -p foo@0.5").run();
+    p.cargo("run -p foo@0.4")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] package(s) `foo@0.4` not found in workspace `[ROOT]/foo`
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn cargo_run_does_not_leak_out_dir() {
+    let p = project()
+        .file("build.rs", "fn main() {}")
+        .file(
+            "src/main.rs",
+            r#"
+            fn main() {
+                assert!(
+                    std::env::var("OUT_DIR").is_err(),
+                    "OUT_DIR should not be set at runtime"
+                );
+            }
+            "#,
+        )
+        .build();
+
+    p.cargo("run")
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[RUNNING] `target/debug/foo[EXE]`
+
+"#]])
+        .run();
 }

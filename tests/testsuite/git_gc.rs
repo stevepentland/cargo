@@ -3,16 +3,15 @@
 use std::env;
 use std::ffi::OsStr;
 use std::path::PathBuf;
-use std::process::Command;
 
+use crate::prelude::*;
 use cargo_test_support::git;
 use cargo_test_support::paths;
 use cargo_test_support::project;
 use cargo_test_support::registry::Package;
-
 use url::Url;
 
-fn find_index() -> PathBuf {
+pub fn find_index() -> PathBuf {
     let dir = paths::home().join(".cargo/registry/index");
     dir.read_dir().unwrap().next().unwrap().unwrap().path()
 }
@@ -37,7 +36,7 @@ fn run_test(path_env: Option<&OsStr>) {
         .build();
     Package::new("bar", "0.1.0").publish();
 
-    foo.cargo("build").run();
+    foo.cargo("check").run();
 
     let index = find_index();
     let path = paths::home().join("tmp");
@@ -62,6 +61,8 @@ fn run_test(path_env: Option<&OsStr>) {
     drop((repo, index));
     Package::new("bar", "0.1.1").publish();
 
+    // Each fetch above creates a new pack file in the index. Count them before
+    // running cargo update so we can verify gc actually consolidates them.
     let before = find_index()
         .join(".git/objects/pack")
         .read_dir()
@@ -69,6 +70,9 @@ fn run_test(path_env: Option<&OsStr>) {
         .count();
     assert!(before > N);
 
+    // Set __CARGO_PACKFILE_LIMIT=10 so gc.autoPackLimit=10 is passed to
+    // `git gc --auto`. This forces consolidation at a low threshold rather
+    // than relying on git's default (which is much higher).
     let mut cmd = foo.cargo("update");
     cmd.env("__CARGO_PACKFILE_LIMIT", "10");
     if let Some(path) = path_env {
@@ -76,6 +80,7 @@ fn run_test(path_env: Option<&OsStr>) {
     }
     cmd.env("CARGO_LOG", "trace");
     cmd.run();
+
     let after = find_index()
         .join(".git/objects/pack")
         .read_dir()
@@ -90,11 +95,8 @@ fn run_test(path_env: Option<&OsStr>) {
     );
 }
 
-#[cargo_test]
+#[cargo_test(requires = "git")]
 fn use_git_gc() {
-    if Command::new("git").arg("--version").output().is_err() {
-        return;
-    }
     run_test(None);
 }
 

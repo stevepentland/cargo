@@ -1,21 +1,25 @@
-use crate::command_prelude::*;
 use cargo::ops;
+use cargo::ops::RegistryOrIndex;
 
-pub fn cli() -> App {
+use crate::command_prelude::*;
+
+pub fn cli() -> Command {
     subcommand("logout")
         .about("Remove an API token from the registry locally")
-        .arg(opt("quiet", "No output printed to stdout").short("q"))
-        .arg(opt("registry", "Registry to use").value_name("REGISTRY"))
-        .after_help("Run `cargo help logout` for more detailed information.\n")
+        .arg_registry("Registry to use")
+        .arg_silent_suggestion()
+        .after_help(color_print::cstr!(
+            "Run `<bright-cyan,bold>cargo help logout</>` for more detailed information.\n"
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches<'_>) -> CliResult {
-    if !config.cli_unstable().credential_process {
-        config
-            .cli_unstable()
-            .fail_if_stable_command(config, "logout", 8933)?;
-    }
-    config.load_credentials()?;
-    ops::registry_logout(config, args.value_of("registry").map(String::from))?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let reg = args.registry_or_index(gctx)?;
+    assert!(
+        !matches!(reg, Some(RegistryOrIndex::Index(..))),
+        "must not be index URL"
+    );
+
+    ops::registry_logout(gctx, reg)?;
     Ok(())
 }

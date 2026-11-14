@@ -7,7 +7,7 @@ SYNOPSIS
        my-command [--abc | --xyz] name
        my-command [-f file]
        my-command (-m | -M) [oldbranch] newbranch
-       my-command (-d | -D) [-r] branchname...
+       my-command (-d | -D) [-r] branchname…
 
 DESCRIPTION
        A description of the command.
@@ -29,8 +29,19 @@ OPTIONS
        -p spec, --package spec
            This has multiple flags.
 
-       named-arg...
+       named-arg…
            A named argument.
+
+       --complex
+           This option has a list.
+
+           o  alpha
+
+           o  beta
+
+           o  gamma
+
+           Then text continues here.
 
    Common Options
        @filename
@@ -42,6 +53,10 @@ OPTIONS
        --foo[=bar]
            Alternate syntax for optional value (with required = for
            disambiguation).
+
+       --split-block
+           An option where the description has a block statement that is split
+           across multiple lines
 
 EXAMPLES
        1. An example

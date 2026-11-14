@@ -1,11 +1,12 @@
 //! Tests for workspace member discovery.
 
-use cargo::core::{Shell, Workspace};
-use cargo::util::config::Config;
-
-use cargo_test_support::install::cargo_home;
+use crate::prelude::*;
+use cargo::context::GlobalContext;
+use cargo::workspace::Workspace;
+use cargo_test_support::paths;
 use cargo_test_support::project;
 use cargo_test_support::registry;
+use cargo_util_terminal::Shell;
 
 /// Tests exclusion of non-directory files from workspace member discovery using glob `*`.
 #[cargo_test]
@@ -22,7 +23,7 @@ fn bad_file_member_exclusion() {
         .file(
             "crates/bar/Cargo.toml",
             r#"
-                [project]
+                [package]
                 name = "bar"
                 version = "0.1.0"
                 authors = []
@@ -33,12 +34,12 @@ fn bad_file_member_exclusion() {
 
     // Prevent this test from accessing the network by setting up .cargo/config.
     registry::init();
-    let config = Config::new(
+    let gctx = GlobalContext::new(
         Shell::from_write(Box::new(Vec::new())),
-        cargo_home(),
-        cargo_home(),
+        paths::cargo_home(),
+        paths::cargo_home(),
     );
-    let ws = Workspace::new(&p.root().join("Cargo.toml"), &config).unwrap();
+    let ws = Workspace::new(&p.root().join("Cargo.toml"), &gctx).unwrap();
     assert_eq!(ws.members().count(), 1);
     assert_eq!(ws.members().next().unwrap().name(), "bar");
 }

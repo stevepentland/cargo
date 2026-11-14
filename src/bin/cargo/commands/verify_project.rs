@@ -1,26 +1,31 @@
+//! Deprecated.
+
 use crate::command_prelude::*;
 
-use std::collections::HashMap;
+use cargo_util::collections::HashMap;
 use std::process;
 
-pub fn cli() -> App {
+pub fn cli() -> Command {
     subcommand("verify-project")
-        .about("Check correctness of crate manifest")
-        .arg(opt("quiet", "No output printed to stdout").short("q"))
+        .hide(true)
+        .about(
+            "\
+DEPRECATED: Check correctness of crate manifest.
+
+See https://github.com/rust-lang/cargo/issues/14679.",
+        )
+        .arg_silent_suggestion()
         .arg_manifest_path()
-        .after_help("Run `cargo help verify-project` for more detailed information.\n")
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches<'_>) -> CliResult {
-    if let Err(e) = args.workspace(config) {
-        let mut h = HashMap::new();
-        h.insert("invalid".to_string(), e.to_string());
-        config.shell().print_json(&h)?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    if let Err(e) = args.workspace(gctx) {
+        gctx.shell()
+            .print_json(&HashMap::from_iter([("invalid", e.to_string())]))?;
         process::exit(1)
     }
 
-    let mut h = HashMap::new();
-    h.insert("success".to_string(), "true".to_string());
-    config.shell().print_json(&h)?;
+    gctx.shell()
+        .print_json(&HashMap::from_iter([("success", "true")]))?;
     Ok(())
 }

@@ -1,11 +1,9 @@
 //! -Zadvanced-env tests
 
+use crate::prelude::*;
 use cargo_test_support::{paths, project, registry::Package};
 
 #[cargo_test]
-// I don't know why, but `Command` forces all env keys to be upper case on
-// Windows. Seems questionable, since I think Windows is case-preserving.
-#[cfg_attr(windows, ignore)]
 fn source_config_env() {
     // Try to define [source] with environment variables.
     let p = project()
@@ -15,6 +13,7 @@ fn source_config_env() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             somedep = "1.0"
@@ -30,8 +29,9 @@ fn source_config_env() {
 
     let path = paths::root().join("registry");
 
-    p.cargo("check -Zadvanced-env")
-        .masquerade_as_nightly_cargo()
+    p.cargo("check")
+        .arg("-Zadvanced-env")
+        .masquerade_as_nightly_cargo(&["advanced-env"])
         .env("CARGO_SOURCE_crates-io_REPLACE_WITH", "my-local-source")
         .env("CARGO_SOURCE_my-local-source_LOCAL_REGISTRY", path)
         .run();

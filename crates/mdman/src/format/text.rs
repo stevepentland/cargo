@@ -1,9 +1,9 @@
 //! Text formatter.
 
-use crate::util::{header_text, unwrap};
 use crate::EventIter;
-use anyhow::{bail, Error};
-use pulldown_cmark::{Alignment, Event, LinkType, Tag};
+use crate::util::{header_text, unwrap};
+use anyhow::{Error, bail};
+use pulldown_cmark::{Alignment, Event, HeadingLevel, LinkType, Tag, TagEnd};
 use std::fmt::Write;
 use std::mem;
 use url::Url;
@@ -26,11 +26,11 @@ impl super::Formatter for TextFormatter {
     fn render_options_start(&self) -> &'static str {
         // Tell pulldown_cmark to ignore this.
         // This will be stripped out later.
-        "<![CDATA["
+        "<![CDATA[\n"
     }
 
     fn render_options_end(&self) -> &'static str {
-        "]]>"
+        "]]>\n"
     }
 
     fn render_option(
@@ -46,7 +46,7 @@ impl super::Formatter for TextFormatter {
         let trimmed: Vec<_> = rendered_options.iter().map(|o| o.trim()).collect();
         // Wrap in HTML tags, they will be stripped out during rendering.
         Ok(format!(
-            "<dt>{}</dt>\n<dd>{}</dd>\n<br>\n",
+            "<dt>{}</dt>\n<dd>\n{}</dd>\n<br>\n",
             trimmed.join(", "),
             block
         ))
@@ -102,6 +102,7 @@ impl<'e> TextRenderer<'e> {
         // Whether or not word-wrapping is enabled.
         let mut wrap_text = true;
 
+        let mut last_seen_link_data = None;
         while let Some((event, range)) = self.parser.next() {
             let this_suppress_paragraph = suppress_paragraph;
             // Always reset suppression, even if the next event isn't a
@@ -116,27 +117,27 @@ impl<'e> TextRenderer<'e> {
                                 self.flush();
                             }
                         }
-                        Tag::Heading(n) => {
+                        Tag::Heading { level, .. } => {
                             self.flush();
-                            if n == 1 {
+                            if level == HeadingLevel::H1 {
                                 let text = header_text(&mut self.parser)?;
                                 self.push_to_line(&text.to_uppercase());
                                 self.hard_break();
                                 self.hard_break();
-                            } else if n == 2 {
+                            } else if level == HeadingLevel::H2 {
                                 let text = header_text(&mut self.parser)?;
                                 self.push_to_line(&text.to_uppercase());
                                 self.flush();
                                 self.indent = 7;
                             } else {
                                 let text = header_text(&mut self.parser)?;
-                                self.push_indent((n as usize - 2) * 3);
+                                self.push_indent((level as usize - 2) * 3);
                                 self.push_to_line(&text);
                                 self.flush();
-                                self.indent = (n as usize - 1) * 3 + 1;
+                                self.indent = (level as usize - 1) * 3 + 1;
                             }
                         }
-                        Tag::BlockQuote => {
+                        Tag::BlockQuote(_kind) => {
                             self.indent += 3;
                         }
                         Tag::CodeBlock(_kind) => {
@@ -180,7 +181,12 @@ impl<'e> TextRenderer<'e> {
                         Tag::Strong => {}
                         // Strikethrough isn't usually supported for TTY.
                         Tag::Strikethrough => self.word.push_str("~~"),
-                        Tag::Link(link_type, dest_url, _title) => {
+                        Tag::Link {
+                            link_type,
+                            dest_url,
+                            ..
+                        } => {
+                            last_seen_link_data = Some((link_type.clone(), dest_url.to_owned()));
                             if dest_url.starts_with('#') {
                                 // In a man page, page-relative anchors don't
                                 // have much meaning.
@@ -211,61 +217,80 @@ impl<'e> TextRenderer<'e> {
                                         range.start
                                     );
                                 }
+                                LinkType::WikiLink { .. } => {
+                                    panic!("wikilink unsupported");
+                                }
                             }
                         }
-                        Tag::Image(_link_type, _dest_url, _title) => {
+                        Tag::Image { .. } => {
                             bail!("images are not currently supported")
                         }
+                        Tag::HtmlBlock { .. }
+                        | Tag::MetadataBlock { .. }
+                        | Tag::DefinitionList
+                        | Tag::DefinitionListTitle
+                        | Tag::DefinitionListDefinition
+                        | Tag::Superscript
+                        | Tag::Subscript => {}
                     }
                 }
-                Event::End(tag) => match &tag {
-                    Tag::Paragraph => {
+                Event::End(tag_end) => match &tag_end {
+                    TagEnd::Paragraph => {
                         self.flush();
                         self.hard_break();
                     }
-                    Tag::Heading(_n) => {}
-                    Tag::BlockQuote => {
+                    TagEnd::Heading(..) => {}
+                    TagEnd::BlockQuote(..) => {
                         self.indent -= 3;
                     }
-                    Tag::CodeBlock(_kind) => {
+                    TagEnd::CodeBlock => {
                         self.hard_break();
                         wrap_text = true;
                         self.indent -= 4;
                     }
-                    Tag::List(_) => {
+                    TagEnd::List(..) => {
                         list.pop();
                     }
-                    Tag::Item => {
+                    TagEnd::Item => {
                         self.flush();
                         self.indent -= 3;
                         self.hard_break();
                     }
-                    Tag::FootnoteDefinition(_label) => {}
-                    Tag::Table(_) => {}
-                    Tag::TableHead => {}
-                    Tag::TableRow => {}
-                    Tag::TableCell => {}
-                    Tag::Emphasis => {}
-                    Tag::Strong => {}
-                    Tag::Strikethrough => self.word.push_str("~~"),
-                    Tag::Link(link_type, dest_url, _title) => {
-                        if dest_url.starts_with('#') {
-                            continue;
-                        }
-                        match link_type {
-                            LinkType::Autolink | LinkType::Email => {}
-                            LinkType::Inline
-                            | LinkType::Reference
-                            | LinkType::Collapsed
-                            | LinkType::Shortcut => self.flush_word(),
-                            _ => {
-                                panic!("unexpected tag {:?}", tag);
+                    TagEnd::FootnoteDefinition => {}
+                    TagEnd::Table => {}
+                    TagEnd::TableHead => {}
+                    TagEnd::TableRow => {}
+                    TagEnd::TableCell => {}
+                    TagEnd::Emphasis => {}
+                    TagEnd::Strong => {}
+                    TagEnd::Strikethrough => self.word.push_str("~~"),
+                    TagEnd::Link => {
+                        if let Some((link_type, ref dest_url)) = last_seen_link_data {
+                            if dest_url.starts_with('#') {
+                                continue;
                             }
+                            match link_type {
+                                LinkType::Autolink | LinkType::Email => {}
+                                LinkType::Inline
+                                | LinkType::Reference
+                                | LinkType::Collapsed
+                                | LinkType::Shortcut => self.flush_word(),
+                                _ => {
+                                    panic!("unexpected tag {:?}", tag_end);
+                                }
+                            }
+                            self.flush_word();
+                            write!(self.word, "<{}>", dest_url)?;
                         }
-                        self.flush_word();
-                        write!(self.word, "<{}>", dest_url)?;
                     }
-                    Tag::Image(_link_type, _dest_url, _title) => {}
+                    TagEnd::HtmlBlock { .. }
+                    | TagEnd::MetadataBlock { .. }
+                    | TagEnd::DefinitionList
+                    | TagEnd::DefinitionListTitle
+                    | TagEnd::Image
+                    | TagEnd::DefinitionListDefinition
+                    | TagEnd::Superscript
+                    | TagEnd::Subscript => {}
                 },
                 Event::Text(t) | Event::Code(t) => {
                     if wrap_text {
@@ -337,6 +362,9 @@ impl<'e> TextRenderer<'e> {
                     self.flush();
                 }
                 Event::TaskListMarker(_b) => unimplemented!(),
+                Event::InlineHtml(..) => unimplemented!(),
+                Event::InlineMath(..) => unimplemented!(),
+                Event::DisplayMath(..) => unimplemented!(),
             }
         }
         Ok(())
@@ -451,20 +479,20 @@ impl Table {
                     | Tag::Strong => {}
                     Tag::Strikethrough => self.cell.push_str("~~"),
                     // Links not yet supported, they usually won't fit.
-                    Tag::Link(_, _, _) => {}
+                    Tag::Link { .. } => {}
                     _ => bail!("unexpected tag in table: {:?}", tag),
                 },
-                Event::End(tag) => match tag {
-                    Tag::Table(_) => return self.render(indent),
-                    Tag::TableCell => {
+                Event::End(tag_end) => match tag_end {
+                    TagEnd::Table => return self.render(indent),
+                    TagEnd::TableCell => {
                         let cell = mem::replace(&mut self.cell, String::new());
                         self.row.push(cell);
                     }
-                    Tag::TableHead | Tag::TableRow => {
+                    TagEnd::TableHead | TagEnd::TableRow => {
                         let row = mem::replace(&mut self.row, Vec::new());
                         self.rows.push(row);
                     }
-                    Tag::Strikethrough => self.cell.push_str("~~"),
+                    TagEnd::Strikethrough => self.cell.push_str("~~"),
                     _ => {}
                 },
                 Event::Text(t) | Event::Code(t) => {

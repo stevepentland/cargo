@@ -3,24 +3,27 @@
 
 set -e
 
-cd src/doc
+cargo_man="doc"
+mdman_man="crates/mdman/doc"
+man_out="etc/man"
+help_man_pages="src/bin/cargo/commands/help/man_pages.rs"
 
-changes=$(git status --porcelain)
+changes=$(git status --porcelain -- $cargo_man $mdman_man $man_out $help_man_pages)
 if [ -n "$changes" ]
 then
     echo "git directory must be clean before running this script."
     exit 1
 fi
 
-./build-man.sh
+cargo build-man
 
-changes=$(git status --porcelain)
+changes=$(git status --porcelain -- $cargo_man $mdman_man $man_out $help_man_pages)
 if [ -n "$changes" ]
 then
-    echo "Detected changes in man pages:"
+    echo "Detected changes of man pages:"
     echo "$changes"
     echo
-    echo "Please run './build-man.sh' in the src/doc directory to rebuild the"
-    echo "man pages, and commit the changes."
+    echo 'Please run `cargo build-man` to rebuild the man pages'
+    echo "and commit the changes."
     exit 1
 fi

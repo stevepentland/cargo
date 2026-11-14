@@ -4,30 +4,56 @@ on:
     branches:
       - master
 
+concurrency:
+  cancel-in-progress: false
+  group: "gh-pages"
+
+permissions:
+  contents: read
+
+env:
+  MDBOOK_VERSION: 0.5.1
+
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-      with:
-        fetch-depth: 0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
     - name: Install mdbook
       run: |
         mkdir mdbook
-        curl -Lf https://github.com/rust-lang/mdBook/releases/download/v0.4.9/mdbook-v0.4.9-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=./mdbook
+        curl -Lf https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz | tar -xz --directory=./mdbook
         echo `pwd`/mdbook >> $GITHUB_PATH
-    - name: Deploy docs
+    - name: Build
       run: |
-        cd src/doc/contrib
+        GENERATE_PY="$(pwd)/ci/generate.py"
+
+        cd doc/contrib
         mdbook build
-        git worktree add gh-pages gh-pages
-        git config user.name "Deploy from CI"
-        git config user.email ""
+
+        mkdir gh-pages
         cd gh-pages
-        # Delete the ref to avoid keeping history.
-        git update-ref -d refs/heads/gh-pages
-        rm -rf contrib
         mv ../book contrib
-        git add contrib
-        git commit -m "Deploy $GITHUB_SHA to gh-pages"
-        git push --force
+
+        # Generate HTML for link redirections.
+        python3 "$GENERATE_PY"
+    - name: Upload Artifact
+      uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+      with:
+        path: doc/contrib/gh-pages
+
+  deploy:
+    needs: build
+
+    permissions:
+      pages: write # to deploy to Pages
+      id-token: write # to verify the deployment originates from an appropriate source
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    runs-on: ubuntu-latest
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
